@@ -7,7 +7,6 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type KeyboardEvent,
-  type MouseEvent,
   type PointerEvent,
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
@@ -47,13 +46,14 @@ type SettingsScopeBinder = {
 type SlotProps = {
   useSession?: (selector: (value: unknown) => unknown) => unknown;
   useInput?: (selector: (value: unknown) => unknown) => unknown;
-  useProjection?: (key: string) => unknown;
+  useProjection?: (key: string, selector?: (value: unknown) => unknown) => unknown;
   sessionId?: unknown;
   inputActions?: {
     setDraft?: (text: string) => void;
     submit?: () => void;
   };
-  commands?: { run?: (...args: unknown[]) => unknown };
+  command?: (line: string) => unknown;
+  commands?: { run?: (...args: unknown[]) => unknown; execute?: (...args: unknown[]) => unknown };
   "commands/run"?: (...args: unknown[]) => unknown;
 };
 
@@ -268,7 +268,11 @@ function readModelPair(value: unknown): ModelRef | undefined {
 function modelFromSelection(value: unknown): ModelRef | undefined {
   const rec = asRecord(value);
   if (rec === undefined) return undefined;
-  return readModelPair(rec.next) ?? readModelPair(rec.lastUsed);
+  return readModelPair(rec.next)
+    ?? readModelPair(rec.lastUsed)
+    ?? readModelPair(rec.current)
+    ?? readModelPair(rec.config)
+    ?? readModelPair(rec);
 }
 
 function useScopeValue<T>(scope: SettingsScope<T> | undefined, fallback: T): T {
@@ -384,10 +388,14 @@ export function apply(ctx: ClientContext): void {
   const binder = settingsBinder(ctx);
   const fixesScope = binder?.bind({ namespace: FIXES_NS, decode: parseFixesSettings });
   const piAiScope = binder?.bind({ namespace: PI_AI_NS });
+  const defaultModelScope = binder?.bind({ namespace: "agent-default-model" });
 
   function ContextPanel(props: SlotProps) {
-    const selection = typeof props.useProjection === "function" ? props.useProjection("modelSelection") : undefined;
-    const current = modelFromSelection(selection);
+    const selection = typeof props.useProjection === "function"
+      ? props.useProjection("modelSelection", (value) => value)
+      : undefined;
+    const defaultModel = useScopeValue<unknown>(defaultModelScope, undefined);
+    const current = modelFromSelection(selection) ?? readModelPair(defaultModel);
     const running = typeof props.useSession === "function"
       ? props.useSession((value) => isRecord(value) && value.running === true) === true
       : false;
@@ -413,9 +421,11 @@ export function apply(ctx: ClientContext): void {
       if (!open) return;
       const onPointer = (event: globalThis.PointerEvent) => {
         const root = rootRef.current;
-        if (root !== null && event.target instanceof Node && !root.contains(event.target)) {
-          setOpen(false);
-        }
+        if (root === null) return;
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        if (path.includes(root)) return;
+        if (event.target instanceof Node && root.contains(event.target)) return;
+        setOpen(false);
       };
       document.addEventListener("pointerdown", onPointer);
       return () => document.removeEventListener("pointerdown", onPointer);
@@ -466,7 +476,7 @@ export function apply(ctx: ClientContext): void {
     const catalogWindow = current === undefined ? undefined : catalogContextWindow(piAi, current.provider, current.model);
     const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
-    const windowDisabled = current === undefined;
+    const windowDisabled = false;
     const compactBusy = running || compacting;
     const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
     const chipWindow = windowLabel(selectedWindow);
@@ -483,7 +493,10 @@ export function apply(ctx: ClientContext): void {
     };
 
     const onWindow = (tokens: WindowChoice) => {
-      if (current === undefined) return;
+      if (current === undefined) {
+        setError("无法解析当前模型，窗口改不了");
+        return;
+      }
       persistField("contextWindows", {
         ...fixes.contextWindows,
         [modelKey(current.provider, current.model)]: tokens,
@@ -510,9 +523,7 @@ export function apply(ctx: ClientContext): void {
     const onCompact = () => {
       if (compacting) return;
       setError("");
-      const command = typeof (props as { command?: unknown }).command === "function"
-        ? (props as { command: (line: string) => unknown }).command
-        : undefined;
+      const command = typeof props.command === "function" ? props.command : undefined;
       if (typeof command === "function") {
         setCompacting(true);
         void Promise.resolve(command("/compact"))
@@ -567,16 +578,6 @@ export function apply(ctx: ClientContext): void {
         }
         return;
       }
-      globalThis.setTimeout(() => {
-        const pending = savedDraftRef.current;
-        if (pending === null) return;
-        savedDraftRef.current = null;
-        try {
-          setDraft(pending);
-        } catch {
-          // restore is best-effort
-        }
-      }, 0);
     };
 
     const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
@@ -677,17 +678,17 @@ export function apply(ctx: ClientContext): void {
                 type: "button",
                 style: { ...compactStyle, opacity: compactBusy ? 0.7 : 1, cursor: compactBusy ? "wait" : "pointer" },
                 title: compactTitle,
-                onMouseDown: (event: MouseEvent<HTMLButtonElement>) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                },
-                onClick: (event: MouseEvent<HTMLButtonElement>) => {
-                  event.preventDefault();
+                onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
                   event.stopPropagation();
                   onCompact();
                 },
               },
               compacting ? "压缩中…" : "压缩上下文",
+            ),
+            createElement(
+              "p",
+              { style: { fontSize: 11, opacity: 0.72, margin: 0, lineHeight: "16px" } },
+              "已爆仓的旧会话要先压缩；只改窗口不会缩短已经超长的历史。",
             ),
             error ? createElement("p", { style: errorStyle }, error) : null,
           )

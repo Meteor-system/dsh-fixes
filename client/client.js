@@ -213,7 +213,7 @@ window.__ModuleLoader__.load({
 		function modelFromSelection(value) {
 			const rec = asRecord(value);
 			if (rec === void 0) return void 0;
-			return readModelPair(rec.next) ?? readModelPair(rec.lastUsed);
+			return readModelPair(rec.next) ?? readModelPair(rec.lastUsed) ?? readModelPair(rec.current) ?? readModelPair(rec.config) ?? readModelPair(rec);
 		}
 		function useScopeValue(scope, fallback) {
 			return (0, react.useSyncExternalStore)((onStoreChange) => {
@@ -313,8 +313,11 @@ window.__ModuleLoader__.load({
 				decode: parseFixesSettings
 			});
 			const piAiScope = binder?.bind({ namespace: PI_AI_NS });
+			const defaultModelScope = binder?.bind({ namespace: "agent-default-model" });
 			function ContextPanel(props) {
-				const current = modelFromSelection(typeof props.useProjection === "function" ? props.useProjection("modelSelection") : void 0);
+				const selection = typeof props.useProjection === "function" ? props.useProjection("modelSelection", (value) => value) : void 0;
+				const defaultModel = useScopeValue(defaultModelScope, void 0);
+				const current = modelFromSelection(selection) ?? readModelPair(defaultModel);
 				const running = typeof props.useSession === "function" ? props.useSession((value) => isRecord(value) && value.running === true) === true : false;
 				const draft = typeof props.useInput === "function" ? String(props.useInput((value) => isRecord(value) && typeof value.draft === "string" ? value.draft : "") ?? "") : "";
 				const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
@@ -332,7 +335,10 @@ window.__ModuleLoader__.load({
 					if (!open) return;
 					const onPointer = (event) => {
 						const root = rootRef.current;
-						if (root !== null && event.target instanceof Node && !root.contains(event.target)) setOpen(false);
+						if (root === null) return;
+						if ((typeof event.composedPath === "function" ? event.composedPath() : []).includes(root)) return;
+						if (event.target instanceof Node && root.contains(event.target)) return;
+						setOpen(false);
 					};
 					document.addEventListener("pointerdown", onPointer);
 					return () => document.removeEventListener("pointerdown", onPointer);
@@ -374,7 +380,7 @@ window.__ModuleLoader__.load({
 				}, [compacting, running]);
 				const selectedWindow = selectedWindowTokens(current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)], current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model));
 				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
-				const windowDisabled = current === void 0;
+				const windowDisabled = false;
 				const compactBusy = running || compacting;
 				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
 				const chipWindow = windowLabel(selectedWindow);
@@ -389,7 +395,10 @@ window.__ModuleLoader__.load({
 					});
 				};
 				const onWindow = (tokens) => {
-					if (current === void 0) return;
+					if (current === void 0) {
+						setError("无法解析当前模型，窗口改不了");
+						return;
+					}
 					persistField("contextWindows", {
 						...fixes.contextWindows,
 						[modelKey(current.provider, current.model)]: tokens
@@ -465,14 +474,6 @@ window.__ModuleLoader__.load({
 						} catch {}
 						return;
 					}
-					globalThis.setTimeout(() => {
-						const pending = savedDraftRef.current;
-						if (pending === null) return;
-						savedDraftRef.current = null;
-						try {
-							setDraft(pending);
-						} catch {}
-					}, 0);
 				};
 				const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
 				return (0, react.createElement)("div", {
@@ -494,7 +495,7 @@ window.__ModuleLoader__.load({
 					key: choice.label,
 					type: "button",
 					disabled: windowDisabled,
-					title: windowDisabled ? "当前对话模型未知" : choice.label,
+					title: choice.label,
 					style: choiceStyle(selectedWindow === choice.tokens, windowDisabled),
 					onClick: () => onWindow(choice.tokens)
 				}, choice.label)))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "压缩模型"), (0, react.createElement)("select", {
@@ -530,16 +531,16 @@ window.__ModuleLoader__.load({
 						cursor: compactBusy ? "wait" : "pointer"
 					},
 					title: compactTitle,
-					onMouseDown: (event) => {
-						event.preventDefault();
-						event.stopPropagation();
-					},
-					onClick: (event) => {
-						event.preventDefault();
+					onPointerDown: (event) => {
 						event.stopPropagation();
 						onCompact();
 					}
-				}, compacting ? "压缩中…" : "压缩上下文"), error ? (0, react.createElement)("p", { style: errorStyle }, error) : null) : null);
+				}, compacting ? "压缩中…" : "压缩上下文"), (0, react.createElement)("p", { style: {
+					fontSize: 11,
+					opacity: .72,
+					margin: 0,
+					lineHeight: "16px"
+				} }, "已爆仓的旧会话要先压缩；只改窗口不会缩短已经超长的历史。"), error ? (0, react.createElement)("p", { style: errorStyle }, error) : null) : null);
 			}
 			ctx.slots.inject("conversation.input.left", function() {
 				return ctx.slots.register({

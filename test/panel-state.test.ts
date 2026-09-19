@@ -47,4 +47,35 @@ describe("buildPanelState", () => {
       models: [],
     });
   });
+
+  it("snaps an unknown catalog window of 262144 to 200000", () => {
+    expect(
+      buildPanelState({
+        provider: "routincodex",
+        model: "kimi",
+        llmContextWindow: 262144,
+        fixes: {
+          contextWindows: {},
+          summarization: null,
+          thresholdRatio: 0.4,
+        },
+        catalog: [],
+      }).window,
+    ).toBe(200000);
+  });
+
+  it("selects no window when stored and catalog windows are both missing", () => {
+    expect(
+      buildPanelState({
+        provider: "routincodex",
+        model: "grok-4.6",
+        fixes: {
+          contextWindows: {},
+          summarization: null,
+          thresholdRatio: 0.4,
+        },
+        catalog: [],
+      }).window,
+    ).toBeUndefined();
+  });
 });

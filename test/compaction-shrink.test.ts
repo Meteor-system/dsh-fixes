@@ -50,6 +50,16 @@ describe("shrinkCompactionOptions", () => {
     expect(texts.some((text: string) => text.includes("[truncated for compaction]"))).toBe(true);
   });
 
+  it("clones compaction calls instead of mutating frozen options", () => {
+    const options = Object.freeze({
+      purpose: "compaction",
+      messages: Object.freeze([{ role: "user", content: "sum" }]),
+    });
+    const result = shrinkCompactionOptions(options);
+    expect(result).not.toBe(options);
+    expect(options.messages).toEqual([{ role: "user", content: "sum" }]);
+  });
+
   it("routes compaction calls to the configured summarizer", () => {
     const result = shrinkCompactionOptions(
       {

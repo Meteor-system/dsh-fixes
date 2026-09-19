@@ -114,6 +114,58 @@ window.__ModuleLoader__.load({
 			}
 			return models;
 		}
+		function finiteTokens(value) {
+			return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+		}
+		function catalogContextWindow(raw, provider, model) {
+			if (!isRecord(raw) || !isRecord(raw.providers)) return void 0;
+			const profile = raw.providers[provider];
+			if (!isRecord(profile)) return void 0;
+			let tokens;
+			if (Array.isArray(profile.models)) for (const entry of profile.models) {
+				if (!isRecord(entry)) continue;
+				if ((typeof entry.id === "string" ? entry.id : typeof entry.name === "string" ? entry.name : "") !== model) continue;
+				const window = finiteTokens(entry.contextWindow);
+				if (window !== void 0) tokens = window;
+			}
+			const overrides = profile.modelOverrides;
+			if (isRecord(overrides) && isRecord(overrides[model])) {
+				const window = finiteTokens(overrides[model].contextWindow);
+				if (window !== void 0) tokens = window;
+			}
+			return tokens;
+		}
+		function selectedWindowTokens(stored, catalogTokens) {
+			if (stored !== void 0) return stored;
+			if (catalogTokens !== void 0) return nearestWindowChoice(catalogTokens);
+		}
+		function lookupCommandsRun(source) {
+			if (!isRecord(source)) return void 0;
+			const direct = source["commands/run"];
+			if (typeof direct === "function") return direct.bind(source);
+			const commands = source.commands;
+			if (isRecord(commands) && typeof commands.run === "function") return commands.run.bind(commands);
+		}
+		function findCommandsRun(ctx, props) {
+			const fromGet = typeof ctx.get === "function" ? ctx.get("commands") : void 0;
+			const fromNamed = typeof ctx.get === "function" ? ctx.get("commands/run") : void 0;
+			if (typeof fromNamed === "function") return fromNamed;
+			return lookupCommandsRun(props) ?? lookupCommandsRun(ctx) ?? lookupCommandsRun(fromGet);
+		}
+		function compactErrorText(reason) {
+			if (!(reason instanceof Error)) return String(reason);
+			const generic = /could not produce|useful summary/i.test(reason.message);
+			const cause = reason.cause instanceof Error ? reason.cause.message : typeof reason.cause === "string" ? reason.cause : void 0;
+			if (generic && cause) return cause;
+			return reason.message;
+		}
+		function resultErrorText(result) {
+			if (!isRecord(result)) return "";
+			if (result.ok === false && typeof result.error === "string") return result.error;
+			if (result.kind === "error" && typeof result.text === "string") return result.text;
+			if (isRecord(result.result) && result.result.kind === "error" && typeof result.result.text === "string") return result.result.text;
+			return "";
+		}
 		function asRecord(value) {
 			return isRecord(value) ? value : void 0;
 		}
@@ -235,12 +287,16 @@ window.__ModuleLoader__.load({
 				const running = typeof props.useSession === "function" ? props.useSession((value) => isRecord(value) && value.running === true) === true : false;
 				const draft = typeof props.useInput === "function" ? String(props.useInput((value) => isRecord(value) && typeof value.draft === "string" ? value.draft : "") ?? "") : "";
 				const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
-				const catalog = catalogFromPiAi(useScopeValue(piAiScope, void 0));
+				const piAi = useScopeValue(piAiScope, void 0);
+				const catalog = catalogFromPiAi(piAi);
 				const [open, setOpen] = (0, react.useState)(false);
 				const [error, setError] = (0, react.useState)("");
 				const [compacting, setCompacting] = (0, react.useState)(false);
 				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
 				const rootRef = (0, react.useRef)(null);
+				const savedDraftRef = (0, react.useRef)(null);
+				const sawRunningRef = (0, react.useRef)(false);
+				const setDraftRef = (0, react.useRef)(props.inputActions?.setDraft);
 				(0, react.useEffect)(() => {
 					if (!open) return;
 					const onPointer = (event) => {
@@ -250,7 +306,42 @@ window.__ModuleLoader__.load({
 					document.addEventListener("pointerdown", onPointer);
 					return () => document.removeEventListener("pointerdown", onPointer);
 				}, [open]);
-				const selectedWindow = (current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)]) ?? (current === void 0 ? void 0 : nearestWindowChoice(5e5));
+				(0, react.useEffect)(() => {
+					setDraftRef.current = props.inputActions?.setDraft;
+				}, [props.inputActions?.setDraft]);
+				(0, react.useEffect)(() => {
+					if (!compacting) {
+						sawRunningRef.current = false;
+						const saved = savedDraftRef.current;
+						if (saved !== null) {
+							savedDraftRef.current = null;
+							try {
+								setDraftRef.current?.(saved);
+							} catch {}
+						}
+						return;
+					}
+					if (running) {
+						sawRunningRef.current = true;
+						const saved = savedDraftRef.current;
+						if (saved !== null) {
+							savedDraftRef.current = null;
+							try {
+								setDraftRef.current?.(saved);
+							} catch {}
+						}
+						return;
+					}
+					if (sawRunningRef.current) {
+						setCompacting(false);
+						return;
+					}
+					const timer = globalThis.setTimeout(() => {
+						setCompacting(false);
+					}, 2e3);
+					return () => globalThis.clearTimeout(timer);
+				}, [compacting, running]);
+				const selectedWindow = selectedWindowTokens(current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)], current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model));
 				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
 				const windowDisabled = current === void 0;
 				const compactDisabled = running || compacting;
@@ -293,25 +384,51 @@ window.__ModuleLoader__.load({
 				};
 				const onCompact = () => {
 					setError("");
+					const run = findCommandsRun(ctx, props);
+					if (typeof run === "function") {
+						setCompacting(true);
+						Promise.resolve(run("context-compact", props.sessionId)).then((result) => {
+							const text = resultErrorText(result);
+							if (text) {
+								setError(text);
+								setCompacting(false);
+							}
+						}).catch((reason) => {
+							setError(compactErrorText(reason));
+							setCompacting(false);
+						});
+						return;
+					}
 					const actions = props.inputActions;
-					if (typeof actions?.setDraft !== "function" || typeof actions.submit !== "function") {
+					const setDraft = actions?.setDraft;
+					const submit = actions?.submit;
+					if (typeof setDraft !== "function" || typeof submit !== "function") {
 						setError("请在输入框输入 /compact");
 						return;
 					}
 					const saved = draft;
+					savedDraftRef.current = saved;
 					setCompacting(true);
 					try {
-						actions.setDraft("/compact");
-						actions.submit();
-						actions.setDraft(saved);
+						setDraft("/compact");
+						submit();
 					} catch (reason) {
-						setError(reason instanceof Error ? reason.message : String(reason));
-						try {
-							actions.setDraft(saved);
-						} catch {}
-					} finally {
+						savedDraftRef.current = null;
+						setError(compactErrorText(reason));
 						setCompacting(false);
+						try {
+							setDraft(saved);
+						} catch {}
+						return;
 					}
+					globalThis.setTimeout(() => {
+						const pending = savedDraftRef.current;
+						if (pending === null) return;
+						savedDraftRef.current = null;
+						try {
+							setDraft(pending);
+						} catch {}
+					}, 0);
 				};
 				const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
 				return (0, react.createElement)("div", {

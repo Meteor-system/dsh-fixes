@@ -1,5 +1,5 @@
 import { applyModelWindow } from "./apply-window.js";
-import { autoCompactTrigger, shouldAutoCompact } from "./compaction-policy.js";
+import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact } from "./compaction-policy.js";
 import { shrinkCompactionOptions } from "./compaction-shrink.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
@@ -236,23 +236,43 @@ function installDuckDuckGoSearch(ctx: PluginContext): void {
   }, "dsh-fixes: duckduckgo search");
 }
 
+function shrinkLiveOptions(ctx: PluginContext, options: unknown) {
+  return shrinkCompactionOptions(
+    options as { purpose?: string; messages?: unknown },
+    undefined,
+    readFixes(ctx.settings).summarization,
+  );
+}
+
 function installCompactionShrink(ctx: PluginContext): void {
+  ctx.effect(() => {
+    const disposer = ctx.on(
+      "llm/stream",
+      (...args: unknown[]) => {
+        const options = args[0];
+        const next = args[1];
+        const shrunk = shrinkLiveOptions(ctx, options);
+        if (typeof next !== "function") return;
+        return (next as (rewritten?: unknown) => unknown)(shrunk);
+      },
+      { global: true },
+    );
+    return () => {
+      if (typeof disposer === "function") disposer();
+    };
+  }, "dsh-fixes: compaction shrink waterfall");
+
+  // Cordis waterfall next() ignores rewritten options and llm.stream closes
+  // over the original request, so the instance wrap is still required.
   const llm = ctx.get("llm") as { stream: (options: unknown) => unknown } | undefined;
   if (llm === undefined || typeof llm.stream !== "function") {
-    log("llm unavailable; compaction shrink not installed");
+    log("llm unavailable; compaction shrink wrap not installed (waterfall still registered)");
     return;
   }
   const runtime = llm;
   ctx.effect(() => {
     const original = runtime.stream.bind(runtime);
-    runtime.stream = (options: unknown) =>
-      original(
-        shrinkCompactionOptions(
-          options as { purpose?: string; messages?: unknown },
-          undefined,
-          readFixes(ctx.settings).summarization,
-        ),
-      );
+    runtime.stream = (options: unknown) => original(shrinkLiveOptions(ctx, options));
     log("wrapping llm.stream for overflow-safe compaction");
     return () => {
       runtime.stream = original;
@@ -348,7 +368,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   }
 
   const busy = agent.status !== undefined && agent.status !== "idle" && agent.status !== "running";
-  const locked = false;
+  const locked = sessionCompactionLocked(agent.session);
   if (
     !shouldAutoCompact({
       estimatedTokens,

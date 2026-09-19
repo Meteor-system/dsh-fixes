@@ -51,6 +51,8 @@ type SlotProps = {
     setDraft?: (text: string) => void;
     submit?: () => void;
   };
+  commands?: { run?: (...args: unknown[]) => unknown };
+  "commands/run"?: (...args: unknown[]) => unknown;
 };
 
 type ClientContext = {
@@ -67,6 +69,8 @@ type ClientContext = {
     ): unknown;
   };
   settingsScope?: SettingsScopeBinder;
+  commands?: { run?: (...args: unknown[]) => unknown };
+  "commands/run"?: (...args: unknown[]) => unknown;
   get?(name: string): unknown;
 };
 
@@ -163,6 +167,74 @@ function catalogFromPiAi(raw: unknown): CatalogModel[] {
     }
   }
   return models;
+}
+
+function finiteTokens(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function catalogContextWindow(raw: unknown, provider: string, model: string): number | undefined {
+  if (!isRecord(raw) || !isRecord(raw.providers)) return undefined;
+  const profile = raw.providers[provider];
+  if (!isRecord(profile)) return undefined;
+  let tokens: number | undefined;
+  if (Array.isArray(profile.models)) {
+    for (const entry of profile.models) {
+      if (!isRecord(entry)) continue;
+      const id = typeof entry.id === "string" ? entry.id : typeof entry.name === "string" ? entry.name : "";
+      if (id !== model) continue;
+      const window = finiteTokens(entry.contextWindow);
+      if (window !== undefined) tokens = window;
+    }
+  }
+  const overrides = profile.modelOverrides;
+  if (isRecord(overrides) && isRecord(overrides[model])) {
+    const window = finiteTokens(overrides[model].contextWindow);
+    if (window !== undefined) tokens = window;
+  }
+  return tokens;
+}
+
+function selectedWindowTokens(stored: WindowChoice | undefined, catalogTokens: number | undefined): WindowChoice | undefined {
+  if (stored !== undefined) return stored;
+  if (catalogTokens !== undefined) return nearestWindowChoice(catalogTokens);
+  return undefined;
+}
+
+function lookupCommandsRun(source: unknown): ((...args: unknown[]) => unknown) | undefined {
+  if (!isRecord(source)) return undefined;
+  const direct = source["commands/run"];
+  if (typeof direct === "function") return direct.bind(source) as (...args: unknown[]) => unknown;
+  const commands = source.commands;
+  if (isRecord(commands) && typeof commands.run === "function") {
+    return commands.run.bind(commands) as (...args: unknown[]) => unknown;
+  }
+  return undefined;
+}
+
+function findCommandsRun(ctx: ClientContext, props: SlotProps): ((...args: unknown[]) => unknown) | undefined {
+  const fromGet = typeof ctx.get === "function" ? ctx.get("commands") : undefined;
+  const fromNamed = typeof ctx.get === "function" ? ctx.get("commands/run") : undefined;
+  if (typeof fromNamed === "function") return fromNamed as (...args: unknown[]) => unknown;
+  return lookupCommandsRun(props) ?? lookupCommandsRun(ctx) ?? lookupCommandsRun(fromGet);
+}
+
+function compactErrorText(reason: unknown): string {
+  if (!(reason instanceof Error)) return String(reason);
+  const generic = /could not produce|useful summary/i.test(reason.message);
+  const cause = reason.cause instanceof Error ? reason.cause.message : typeof reason.cause === "string" ? reason.cause : undefined;
+  if (generic && cause) return cause;
+  return reason.message;
+}
+
+function resultErrorText(result: unknown): string {
+  if (!isRecord(result)) return "";
+  if (result.ok === false && typeof result.error === "string") return result.error;
+  if (result.kind === "error" && typeof result.text === "string") return result.text;
+  if (isRecord(result.result) && result.result.kind === "error" && typeof result.result.text === "string") {
+    return result.result.text;
+  }
+  return "";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -319,6 +391,9 @@ export function apply(ctx: ClientContext): void {
     const [compacting, setCompacting] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
     const rootRef = useRef<HTMLDivElement | null>(null);
+    const savedDraftRef = useRef<string | null>(null);
+    const sawRunningRef = useRef(false);
+    const setDraftRef = useRef(props.inputActions?.setDraft);
 
     useEffect(() => {
       if (!open) return;
@@ -332,8 +407,50 @@ export function apply(ctx: ClientContext): void {
       return () => document.removeEventListener("pointerdown", onPointer);
     }, [open]);
 
+    useEffect(() => {
+      setDraftRef.current = props.inputActions?.setDraft;
+    }, [props.inputActions?.setDraft]);
+
+    useEffect(() => {
+      if (!compacting) {
+        sawRunningRef.current = false;
+        const saved = savedDraftRef.current;
+        if (saved !== null) {
+          savedDraftRef.current = null;
+          try {
+            setDraftRef.current?.(saved);
+          } catch {
+            // restore is best-effort
+          }
+        }
+        return;
+      }
+      if (running) {
+        sawRunningRef.current = true;
+        const saved = savedDraftRef.current;
+        if (saved !== null) {
+          savedDraftRef.current = null;
+          try {
+            setDraftRef.current?.(saved);
+          } catch {
+            // restore is best-effort
+          }
+        }
+        return;
+      }
+      if (sawRunningRef.current) {
+        setCompacting(false);
+        return;
+      }
+      const timer = globalThis.setTimeout(() => {
+        setCompacting(false);
+      }, 2000);
+      return () => globalThis.clearTimeout(timer);
+    }, [compacting, running]);
+
     const storedWindow = current === undefined ? undefined : fixes.contextWindows[modelKey(current.provider, current.model)];
-    const selectedWindow = storedWindow ?? (current === undefined ? undefined : nearestWindowChoice(500000));
+    const catalogWindow = current === undefined ? undefined : catalogContextWindow(piAi, current.provider, current.model);
+    const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
     const windowDisabled = current === undefined;
     const compactDisabled = running || compacting;
@@ -378,27 +495,57 @@ export function apply(ctx: ClientContext): void {
 
     const onCompact = () => {
       setError("");
+      const run = findCommandsRun(ctx, props);
+      if (typeof run === "function") {
+        setCompacting(true);
+        void Promise.resolve(run("context-compact", props.sessionId))
+          .then((result) => {
+            const text = resultErrorText(result);
+            if (text) {
+              setError(text);
+              setCompacting(false);
+            }
+          })
+          .catch((reason: unknown) => {
+            setError(compactErrorText(reason));
+            setCompacting(false);
+          });
+        return;
+      }
       const actions = props.inputActions;
-      if (typeof actions?.setDraft !== "function" || typeof actions.submit !== "function") {
+      const setDraft = actions?.setDraft;
+      const submit = actions?.submit;
+      if (typeof setDraft !== "function" || typeof submit !== "function") {
         setError("请在输入框输入 /compact");
         return;
       }
       const saved = draft;
+      savedDraftRef.current = saved;
       setCompacting(true);
       try {
-        actions.setDraft("/compact");
-        actions.submit();
-        actions.setDraft(saved);
+        setDraft("/compact");
+        submit();
       } catch (reason: unknown) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        savedDraftRef.current = null;
+        setError(compactErrorText(reason));
+        setCompacting(false);
         try {
-          actions.setDraft(saved);
+          setDraft(saved);
         } catch {
           // restore is best-effort
         }
-      } finally {
-        setCompacting(false);
+        return;
       }
+      globalThis.setTimeout(() => {
+        const pending = savedDraftRef.current;
+        if (pending === null) return;
+        savedDraftRef.current = null;
+        try {
+          setDraft(pending);
+        } catch {
+          // restore is best-effort
+        }
+      }, 0);
     };
 
     const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);

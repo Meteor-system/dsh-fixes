@@ -41,7 +41,7 @@ Restart `dsh web` after the first install. Later source changes need a rebuild
 | Known models (e.g. grok-4.6) | fill official `contextWindow` / `maxTokens` (500k for grok-4.6) |
 | Other undeclared third-party models | fill `500000`; leave explicit windows (Kimi 128k/256k/1M) alone |
 | `web_search` | register a free search backend and switch `searchProvider` from `deepseek-official` to `duckduckgo` (no DeepSeek key) |
-| Local agent presets | compaction threshold 80%→40%, overflow retries 1→3 |
+| Auto-compact | Context slider (20–90%, default 40%); shipped Agent presets are not edited |
 | `/compact` summarizer | strip images and truncate huge tool results so overflowed sessions can still summarize |
 
 Search tries DuckDuckGo's HTML results page first, then falls back to Bing if DDG is unreachable or challenged. There is no official search API. `web_fetch` still uses the existing `http` provider.

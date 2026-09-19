@@ -38,7 +38,7 @@ dsh plugin --profile web add .
 | 已知多模态模型（如 grok-4.6） | 补上官方 `contextWindow` / `maxTokens`（grok-4.6 为 50 万） |
 | 其它未声明窗口的第三方模型 | 一律补 `500000`；已有数字（如 Kimi 自己的 128k/256k/1M）不改 |
 | `web_search` | 注册免费搜索后端，并把 `searchProvider` 从 `deepseek-official` 切到 `duckduckgo`，不再需要 DeepSeek key |
-| 本地 Agent preset | 压缩阈值 80%→40%，溢出抢救 1→3 次 |
+| 自动压缩 | 由上下文芯片的滑块控制（20%–90%，默认 40%）；不改官方 Agent preset |
 | `/compact` 摘要请求 | 去掉图片、截断过长工具结果，避免爆掉的旧会话因为摘要调用再次超窗而失败 |
 
 先走 DuckDuckGo HTML 结果页；连不上或被 challenge 时自动回落到必应网页搜索。没有官方搜索 API。`web_fetch` 仍走原来的 `http` 提供方。

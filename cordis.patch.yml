@@ -1,0 +1,10 @@
+# dsh-fixes: host-side compatibility patches for DeepSeek Harness.
+# - restore image input on third-party gateway models that omitted it
+# - fill official context windows (grok-4.6 = 500k) and lower the 262144 sentinel
+# - switch web_search off DeepSeek's paid key onto free DuckDuckGo
+- insert:
+    - id: dsh-fixes
+      name: dsh-fixes
+- id: web
+  config:
+    searchProvider: duckduckgo

@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		//#region src/client/index.ts
 		const name = "dsh-fixes";
-		const inject = ["slots"];
+		const inject = ["slots", "settingsScope"];
 		const FIXES_NS = "dsh-fixes";
 		const PI_AI_NS = "llm-pi-ai";
 		const WINDOW_CHOICES = [
@@ -47,8 +47,9 @@ window.__ModuleLoader__.load({
 		}
 		function parseFixesSettings(raw) {
 			if (!isRecord(raw)) return {
-				...DEFAULT_FIXES,
-				contextWindows: {}
+				contextWindows: {},
+				summarization: null,
+				thresholdRatio: .4
 			};
 			const contextWindows = {};
 			if (isRecord(raw.contextWindows)) {
@@ -82,50 +83,12 @@ window.__ModuleLoader__.load({
 			}
 			return best;
 		}
-		function readSettingsService(ctx) {
-			if (ctx.settings !== void 0) return ctx.settings;
+		function settingsBinder(ctx) {
+			if (ctx.settingsScope !== void 0 && typeof ctx.settingsScope.bind === "function") return ctx.settingsScope;
 			if (typeof ctx.get === "function") {
-				const settings = ctx.get("settings");
-				if (isRecord(settings)) return settings;
+				const value = ctx.get("settingsScope");
+				if (isRecord(value) && typeof value.bind === "function") return value;
 			}
-		}
-		function settingsGet(ctx, namespace) {
-			const settings = readSettingsService(ctx);
-			if (typeof settings?.get === "function") try {
-				return settings.get(namespace);
-			} catch {
-				return;
-			}
-		}
-		function settingsUpdate(ctx, namespace, value) {
-			const settings = readSettingsService(ctx);
-			if (typeof settings?.update !== "function") return Promise.reject(/* @__PURE__ */ new Error("settings unavailable"));
-			return Promise.resolve(settings.update(namespace, value)).then(() => void 0);
-		}
-		function asDisposer(value) {
-			return typeof value === "function" ? () => {
-				value();
-			} : void 0;
-		}
-		function subscribeSettings(ctx, onChange) {
-			const settings = readSettingsService(ctx);
-			const disposers = [];
-			if (typeof settings?.watch === "function") {
-				const off = asDisposer(settings.watch(FIXES_NS, onChange));
-				if (off !== void 0) disposers.push(off);
-				const offPi = asDisposer(settings.watch(PI_AI_NS, onChange));
-				if (offPi !== void 0) disposers.push(offPi);
-			}
-			if (typeof ctx.on === "function") {
-				const off = asDisposer(ctx.on("settings/updated", (...args) => {
-					const namespace = args[0];
-					if (namespace === FIXES_NS || namespace === PI_AI_NS) onChange();
-				}));
-				if (off !== void 0) disposers.push(off);
-			}
-			return () => {
-				for (const dispose of disposers) dispose();
-			};
 		}
 		function catalogFromPiAi(raw) {
 			if (!isRecord(raw) || !isRecord(raw.providers)) return [];
@@ -141,7 +104,7 @@ window.__ModuleLoader__.load({
 					const key = modelKey(provider, model);
 					if (seen.has(key)) continue;
 					seen.add(key);
-					const display = typeof entry.name === "string" && entry.name && entry.name !== model ? `${entry.name}` : model;
+					const display = typeof entry.name === "string" && entry.name && entry.name !== model ? entry.name : model;
 					models.push({
 						provider,
 						model,
@@ -157,61 +120,23 @@ window.__ModuleLoader__.load({
 		function readModelPair(value) {
 			const rec = asRecord(value);
 			if (rec === void 0) return void 0;
-			const nested = asRecord(rec.config) ?? asRecord(asRecord(rec.header)?.config) ?? asRecord(rec.header) ?? asRecord(rec.options) ?? asRecord(rec.requestConfig) ?? rec;
-			const provider = nested.provider;
-			const model = nested.model;
+			const provider = rec.provider;
+			const model = rec.model;
 			if (typeof provider === "string" && provider.length > 0 && typeof model === "string" && model.length > 0) return {
 				provider,
 				model
 			};
 		}
-		function walkForModel(value, depth = 0) {
-			const direct = readModelPair(value);
-			if (direct !== void 0) return direct;
-			if (depth > 4) return void 0;
+		function modelFromSelection(value) {
 			const rec = asRecord(value);
 			if (rec === void 0) return void 0;
-			for (const key of [
-				"config",
-				"header",
-				"prompt",
-				"snapshot",
-				"session",
-				"options",
-				"requestConfig",
-				"lastRequest"
-			]) {
-				const found = walkForModel(rec[key], depth + 1);
-				if (found !== void 0) return found;
-			}
+			return readModelPair(rec.next) ?? readModelPair(rec.lastUsed);
 		}
-		function currentModelFromSnapshots(session, conversation) {
-			return walkForModel(session) ?? walkForModel(conversation);
-		}
-		function snapshotOf(hook) {
-			if (typeof hook !== "function") return void 0;
-			try {
-				return hook((value) => value);
-			} catch {
-				try {
-					return hook();
-				} catch {
-					return;
-				}
-			}
-		}
-		function sessionBusy(session) {
-			const rec = asRecord(session);
-			if (rec === void 0) return false;
-			return rec.running === true || rec.status === "running" || rec.status === "busy";
-		}
-		function findRunCommand(props, chat) {
-			if (typeof props.runCommand === "function") return props.runCommand.bind(props);
-			if (typeof props.command === "function") return props.command.bind(props);
-			const actions = props.inputActions;
-			if (typeof actions?.runCommand === "function") return actions.runCommand.bind(actions);
-			if (typeof actions?.submitCommand === "function") return actions.submitCommand.bind(actions);
-			if (typeof chat?.runCommand === "function") return chat.runCommand.bind(chat);
+		function useScopeValue(scope, fallback) {
+			return (0, react.useSyncExternalStore)((onStoreChange) => {
+				if (scope === void 0) return () => void 0;
+				return scope.subscribe(onStoreChange);
+			}, () => scope?.getSnapshot().value ?? fallback, () => fallback);
 		}
 		const chipStyle = {
 			display: "inline-flex",
@@ -299,27 +224,23 @@ window.__ModuleLoader__.load({
 			margin: 0
 		};
 		function apply(ctx) {
+			const binder = settingsBinder(ctx);
+			const fixesScope = binder?.bind({
+				namespace: FIXES_NS,
+				decode: parseFixesSettings
+			});
+			const piAiScope = binder?.bind({ namespace: PI_AI_NS });
 			function ContextPanel(props) {
-				const session = snapshotOf(props.useSession);
-				const conversation = snapshotOf(props.useConversation);
-				const chat = typeof props.useChat === "function" ? snapshotOf(props.useChat) : void 0;
-				const current = currentModelFromSnapshots(session, conversation);
-				const busy = sessionBusy(session);
+				const current = modelFromSelection(typeof props.useProjection === "function" ? props.useProjection("modelSelection") : void 0);
+				const running = typeof props.useSession === "function" ? props.useSession((value) => isRecord(value) && value.running === true) === true : false;
+				const draft = typeof props.useInput === "function" ? String(props.useInput((value) => isRecord(value) && typeof value.draft === "string" ? value.draft : "") ?? "") : "";
+				const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
+				const catalog = catalogFromPiAi(useScopeValue(piAiScope, void 0));
 				const [open, setOpen] = (0, react.useState)(false);
-				const [fixes, setFixes] = (0, react.useState)(() => parseFixesSettings(settingsGet(ctx, FIXES_NS)));
-				const [catalog, setCatalog] = (0, react.useState)(() => catalogFromPiAi(settingsGet(ctx, PI_AI_NS)));
 				const [error, setError] = (0, react.useState)("");
 				const [compacting, setCompacting] = (0, react.useState)(false);
 				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
 				const rootRef = (0, react.useRef)(null);
-				(0, react.useEffect)(() => {
-					const pull = () => {
-						setFixes(parseFixesSettings(settingsGet(ctx, FIXES_NS)));
-						setCatalog(catalogFromPiAi(settingsGet(ctx, PI_AI_NS)));
-					};
-					pull();
-					return subscribeSettings(ctx, pull);
-				}, []);
 				(0, react.useEffect)(() => {
 					if (!open) return;
 					const onPointer = (event) => {
@@ -332,52 +253,65 @@ window.__ModuleLoader__.load({
 				const selectedWindow = (current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)]) ?? (current === void 0 ? void 0 : nearestWindowChoice(5e5));
 				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
 				const windowDisabled = current === void 0;
-				const compactDisabled = busy || compacting;
-				const compactTitle = compacting ? "压缩进行中" : busy ? "忙碌" : void 0;
+				const compactDisabled = running || compacting;
+				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : void 0;
 				const chipWindow = windowLabel(selectedWindow);
-				const persist = (patch) => {
-					const next = {
-						contextWindows: patch.contextWindows ?? fixes.contextWindows,
-						summarization: patch.summarization !== void 0 ? patch.summarization : fixes.summarization,
-						thresholdRatio: patch.thresholdRatio ?? fixes.thresholdRatio
-					};
-					setFixes(next);
-					settingsUpdate(ctx, FIXES_NS, next).catch((reason) => {
+				const persistField = (field, value) => {
+					if (fixesScope === void 0) {
+						setError("settings unavailable");
+						return;
+					}
+					setError("");
+					fixesScope.set(field, value).catch((reason) => {
 						setError(reason instanceof Error ? reason.message : String(reason));
 					});
 				};
 				const onWindow = (tokens) => {
 					if (current === void 0) return;
-					persist({ contextWindows: {
+					persistField("contextWindows", {
 						...fixes.contextWindows,
 						[modelKey(current.provider, current.model)]: tokens
-					} });
+					});
 				};
 				const onSummarizer = (value) => {
 					if (value === "") {
-						persist({ summarization: null });
+						persistField("summarization", null);
 						return;
 					}
 					const index = value.indexOf("/");
 					if (index <= 0) return;
-					persist({ summarization: {
+					persistField("summarization", {
 						provider: value.slice(0, index),
 						model: value.slice(index + 1)
-					} });
+					});
+				};
+				const commitThreshold = (raw) => {
+					const next = Number(raw);
+					setDraftPercent(null);
+					if (!Number.isFinite(next)) return;
+					persistField("thresholdRatio", next / 100);
 				};
 				const onCompact = () => {
 					setError("");
-					const run = findRunCommand(props, chat);
-					if (run === void 0) {
+					const actions = props.inputActions;
+					if (typeof actions?.setDraft !== "function" || typeof actions.submit !== "function") {
 						setError("请在输入框输入 /compact");
 						return;
 					}
+					const saved = draft;
 					setCompacting(true);
-					Promise.resolve(run("compact")).catch((reason) => {
+					try {
+						actions.setDraft("/compact");
+						actions.submit();
+						actions.setDraft(saved);
+					} catch (reason) {
 						setError(reason instanceof Error ? reason.message : String(reason));
-					}).finally(() => {
+						try {
+							actions.setDraft(saved);
+						} catch {}
+					} finally {
 						setCompacting(false);
-					});
+					}
 				};
 				const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
 				return (0, react.createElement)("div", {
@@ -416,18 +350,13 @@ window.__ModuleLoader__.load({
 					step: 5,
 					value: percent,
 					onChange: (event) => {
-						const next = Number(event.target.value);
-						setDraftPercent(next);
+						setDraftPercent(Number(event.currentTarget.value));
 					},
-					onPointerUp: () => {
-						const next = draftPercent ?? percent;
-						setDraftPercent(null);
-						persist({ thresholdRatio: next / 100 });
+					onPointerUp: (event) => {
+						commitThreshold(event.currentTarget.value);
 					},
-					onKeyUp: () => {
-						const next = draftPercent ?? percent;
-						setDraftPercent(null);
-						persist({ thresholdRatio: next / 100 });
+					onKeyUp: (event) => {
+						commitThreshold(event.currentTarget.value);
 					}
 				}), (0, react.createElement)("div", { style: { fontSize: 12 } }, `用到 ${percent}% 时压缩`)), (0, react.createElement)("button", {
 					type: "button",

@@ -1,7 +1,17 @@
-import { createElement, useEffect, useRef, useState, type CSSProperties, type ChangeEvent } from "react";
+import {
+  createElement,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ChangeEvent,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 
 export const name = "dsh-fixes";
-export const inject = ["slots"];
+export const inject = ["slots", "settingsScope"];
 
 const FIXES_NS = "dsh-fixes";
 const PI_AI_NS = "llm-pi-ai";
@@ -22,24 +32,24 @@ type FixesSettings = {
 type ModelRef = { provider: string; model: string };
 type CatalogModel = { provider: string; model: string; label: string };
 
-type SettingsLike = {
-  get?(namespace: string): unknown;
-  update?(namespace: string, value: unknown): unknown;
-  watch?(namespace: string, listener: () => void): unknown;
+type SettingsScope<T> = {
+  getSnapshot(): { value?: T };
+  subscribe(listener: () => void): () => void;
+  set(field: string, value: unknown): Promise<void>;
+};
+
+type SettingsScopeBinder = {
+  bind<T>(spec: { namespace: string; decode?: (section: unknown) => T | undefined }): SettingsScope<T>;
 };
 
 type SlotProps = {
-  useSession?: (selector?: (value: unknown) => unknown) => unknown;
-  useConversation?: (selector?: (value: unknown) => unknown) => unknown;
-  useInput?: (selector?: (value: unknown) => unknown) => unknown;
-  useChat?: () => { runCommand?: (name: string) => unknown };
-  runCommand?: (name: string) => unknown;
-  command?: (name: string) => unknown;
+  useSession?: (selector: (value: unknown) => unknown) => unknown;
+  useInput?: (selector: (value: unknown) => unknown) => unknown;
+  useProjection?: (key: string) => unknown;
+  sessionId?: unknown;
   inputActions?: {
     setDraft?: (text: string) => void;
     submit?: () => void;
-    submitCommand?: (name: string) => unknown;
-    runCommand?: (name: string) => unknown;
   };
 };
 
@@ -56,9 +66,8 @@ type ClientContext = {
       render: (props: SlotProps) => unknown,
     ): unknown;
   };
-  settings?: SettingsLike;
+  settingsScope?: SettingsScopeBinder;
   get?(name: string): unknown;
-  on?(event: string, listener: (...args: unknown[]) => void): unknown;
 };
 
 const DEFAULT_FIXES: FixesSettings = {
@@ -83,7 +92,7 @@ function clampThresholdRatio(value: unknown): number {
 }
 
 function parseFixesSettings(raw: unknown): FixesSettings {
-  if (!isRecord(raw)) return { ...DEFAULT_FIXES, contextWindows: {} };
+  if (!isRecord(raw)) return { contextWindows: {}, summarization: null, thresholdRatio: 0.4 };
   const contextWindows: Record<string, WindowChoice> = {};
   if (isRecord(raw.contextWindows)) {
     for (const [key, tokens] of Object.entries(raw.contextWindows)) {
@@ -122,58 +131,17 @@ function nearestWindowChoice(tokens: number): WindowChoice {
   return best;
 }
 
-function readSettingsService(ctx: ClientContext): SettingsLike | undefined {
-  if (ctx.settings !== undefined) return ctx.settings;
-  if (typeof ctx.get === "function") {
-    const settings = ctx.get("settings");
-    if (isRecord(settings)) return settings as SettingsLike;
+function settingsBinder(ctx: ClientContext): SettingsScopeBinder | undefined {
+  if (ctx.settingsScope !== undefined && typeof ctx.settingsScope.bind === "function") {
+    return ctx.settingsScope;
   }
-  return undefined;
-}
-
-function settingsGet(ctx: ClientContext, namespace: string): unknown {
-  const settings = readSettingsService(ctx);
-  if (typeof settings?.get === "function") {
-    try {
-      return settings.get(namespace);
-    } catch {
-      return undefined;
+  if (typeof ctx.get === "function") {
+    const value = ctx.get("settingsScope");
+    if (isRecord(value) && typeof value.bind === "function") {
+      return value as SettingsScopeBinder;
     }
   }
   return undefined;
-}
-
-function settingsUpdate(ctx: ClientContext, namespace: string, value: unknown): Promise<void> {
-  const settings = readSettingsService(ctx);
-  if (typeof settings?.update !== "function") {
-    return Promise.reject(new Error("settings unavailable"));
-  }
-  return Promise.resolve(settings.update(namespace, value)).then(() => undefined);
-}
-
-function asDisposer(value: unknown): (() => void) | undefined {
-  return typeof value === "function" ? () => { value(); } : undefined;
-}
-
-function subscribeSettings(ctx: ClientContext, onChange: () => void): () => void {
-  const settings = readSettingsService(ctx);
-  const disposers: Array<() => void> = [];
-  if (typeof settings?.watch === "function") {
-    const off = asDisposer(settings.watch(FIXES_NS, onChange));
-    if (off !== undefined) disposers.push(off);
-    const offPi = asDisposer(settings.watch(PI_AI_NS, onChange));
-    if (offPi !== undefined) disposers.push(offPi);
-  }
-  if (typeof ctx.on === "function") {
-    const off = asDisposer(ctx.on("settings/updated", (...args: unknown[]) => {
-      const namespace = args[0];
-      if (namespace === FIXES_NS || namespace === PI_AI_NS) onChange();
-    }));
-    if (off !== undefined) disposers.push(off);
-  }
-  return () => {
-    for (const dispose of disposers) dispose();
-  };
 }
 
 function catalogFromPiAi(raw: unknown): CatalogModel[] {
@@ -190,7 +158,7 @@ function catalogFromPiAi(raw: unknown): CatalogModel[] {
       const key = modelKey(provider, model);
       if (seen.has(key)) continue;
       seen.add(key);
-      const display = typeof entry.name === "string" && entry.name && entry.name !== model ? `${entry.name}` : model;
+      const display = typeof entry.name === "string" && entry.name && entry.name !== model ? entry.name : model;
       models.push({ provider, model, label: `${provider}/${display}` });
     }
   }
@@ -204,68 +172,29 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function readModelPair(value: unknown): ModelRef | undefined {
   const rec = asRecord(value);
   if (rec === undefined) return undefined;
-  const nested =
-    asRecord(rec.config) ??
-    asRecord(asRecord(rec.header)?.config) ??
-    asRecord(rec.header) ??
-    asRecord(rec.options) ??
-    asRecord(rec.requestConfig) ??
-    rec;
-  const provider = nested.provider;
-  const model = nested.model;
+  const provider = rec.provider;
+  const model = rec.model;
   if (typeof provider === "string" && provider.length > 0 && typeof model === "string" && model.length > 0) {
     return { provider, model };
   }
   return undefined;
 }
 
-function walkForModel(value: unknown, depth = 0): ModelRef | undefined {
-  const direct = readModelPair(value);
-  if (direct !== undefined) return direct;
-  if (depth > 4) return undefined;
+function modelFromSelection(value: unknown): ModelRef | undefined {
   const rec = asRecord(value);
   if (rec === undefined) return undefined;
-  for (const key of ["config", "header", "prompt", "snapshot", "session", "options", "requestConfig", "lastRequest"]) {
-    const found = walkForModel(rec[key], depth + 1);
-    if (found !== undefined) return found;
-  }
-  return undefined;
+  return readModelPair(rec.next) ?? readModelPair(rec.lastUsed);
 }
 
-function currentModelFromSnapshots(session: unknown, conversation: unknown): ModelRef | undefined {
-  return walkForModel(session) ?? walkForModel(conversation);
-}
-
-function snapshotOf(hook: unknown): unknown {
-  if (typeof hook !== "function") return undefined;
-  try {
-    return hook((value: unknown) => value);
-  } catch {
-    try {
-      return (hook as () => unknown)();
-    } catch {
-      return undefined;
-    }
-  }
-}
-
-function sessionBusy(session: unknown): boolean {
-  const rec = asRecord(session);
-  if (rec === undefined) return false;
-  return rec.running === true || rec.status === "running" || rec.status === "busy";
-}
-
-function findRunCommand(
-  props: SlotProps,
-  chat?: { runCommand?: (name: string) => unknown },
-): ((name: string) => unknown) | undefined {
-  if (typeof props.runCommand === "function") return props.runCommand.bind(props);
-  if (typeof props.command === "function") return props.command.bind(props);
-  const actions = props.inputActions;
-  if (typeof actions?.runCommand === "function") return actions.runCommand.bind(actions);
-  if (typeof actions?.submitCommand === "function") return actions.submitCommand.bind(actions);
-  if (typeof chat?.runCommand === "function") return chat.runCommand.bind(chat);
-  return undefined;
+function useScopeValue<T>(scope: SettingsScope<T> | undefined, fallback: T): T {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      if (scope === undefined) return () => undefined;
+      return scope.subscribe(onStoreChange);
+    },
+    () => scope?.getSnapshot().value ?? fallback,
+    () => fallback,
+  );
 }
 
 const chipStyle: CSSProperties = {
@@ -367,33 +296,33 @@ const errorStyle: CSSProperties = {
 };
 
 export function apply(ctx: ClientContext): void {
+  const binder = settingsBinder(ctx);
+  const fixesScope = binder?.bind({ namespace: FIXES_NS, decode: parseFixesSettings });
+  const piAiScope = binder?.bind({ namespace: PI_AI_NS });
+
   function ContextPanel(props: SlotProps) {
-    const session = snapshotOf(props.useSession);
-    const conversation = snapshotOf(props.useConversation);
-    const chat = typeof props.useChat === "function" ? snapshotOf(props.useChat) as { runCommand?: (name: string) => unknown } : undefined;
-    const current = currentModelFromSnapshots(session, conversation);
-    const busy = sessionBusy(session);
+    const selection = typeof props.useProjection === "function" ? props.useProjection("modelSelection") : undefined;
+    const current = modelFromSelection(selection);
+    const running = typeof props.useSession === "function"
+      ? props.useSession((value) => isRecord(value) && value.running === true) === true
+      : false;
+    const draft = typeof props.useInput === "function"
+      ? String(props.useInput((value) => (isRecord(value) && typeof value.draft === "string" ? value.draft : "")) ?? "")
+      : "";
+
+    const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
+    const piAi = useScopeValue<unknown>(piAiScope, undefined);
+    const catalog = catalogFromPiAi(piAi);
 
     const [open, setOpen] = useState(false);
-    const [fixes, setFixes] = useState<FixesSettings>(() => parseFixesSettings(settingsGet(ctx, FIXES_NS)));
-    const [catalog, setCatalog] = useState<CatalogModel[]>(() => catalogFromPiAi(settingsGet(ctx, PI_AI_NS)));
     const [error, setError] = useState("");
     const [compacting, setCompacting] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
     const rootRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
-      const pull = () => {
-        setFixes(parseFixesSettings(settingsGet(ctx, FIXES_NS)));
-        setCatalog(catalogFromPiAi(settingsGet(ctx, PI_AI_NS)));
-      };
-      pull();
-      return subscribeSettings(ctx, pull);
-    }, []);
-
-    useEffect(() => {
       if (!open) return;
-      const onPointer = (event: PointerEvent) => {
+      const onPointer = (event: globalThis.PointerEvent) => {
         const root = rootRef.current;
         if (root !== null && event.target instanceof Node && !root.contains(event.target)) {
           setOpen(false);
@@ -407,54 +336,69 @@ export function apply(ctx: ClientContext): void {
     const selectedWindow = storedWindow ?? (current === undefined ? undefined : nearestWindowChoice(500000));
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
     const windowDisabled = current === undefined;
-    const compactDisabled = busy || compacting;
-    const compactTitle = compacting ? "压缩进行中" : busy ? "忙碌" : undefined;
+    const compactDisabled = running || compacting;
+    const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : undefined;
     const chipWindow = windowLabel(selectedWindow);
 
-    const persist = (patch: Partial<FixesSettings>) => {
-      const next: FixesSettings = {
-        contextWindows: patch.contextWindows ?? fixes.contextWindows,
-        summarization: patch.summarization !== undefined ? patch.summarization : fixes.summarization,
-        thresholdRatio: patch.thresholdRatio ?? fixes.thresholdRatio,
-      };
-      setFixes(next);
-      void settingsUpdate(ctx, FIXES_NS, next).catch((reason: unknown) => {
+    const persistField = (field: string, value: unknown) => {
+      if (fixesScope === undefined) {
+        setError("settings unavailable");
+        return;
+      }
+      setError("");
+      void fixesScope.set(field, value).catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : String(reason));
       });
     };
 
     const onWindow = (tokens: WindowChoice) => {
       if (current === undefined) return;
-      persist({
-        contextWindows: { ...fixes.contextWindows, [modelKey(current.provider, current.model)]: tokens },
+      persistField("contextWindows", {
+        ...fixes.contextWindows,
+        [modelKey(current.provider, current.model)]: tokens,
       });
     };
 
     const onSummarizer = (value: string) => {
       if (value === "") {
-        persist({ summarization: null });
+        persistField("summarization", null);
         return;
       }
       const index = value.indexOf("/");
       if (index <= 0) return;
-      persist({ summarization: { provider: value.slice(0, index), model: value.slice(index + 1) } });
+      persistField("summarization", { provider: value.slice(0, index), model: value.slice(index + 1) });
+    };
+
+    const commitThreshold = (raw: string) => {
+      const next = Number(raw);
+      setDraftPercent(null);
+      if (!Number.isFinite(next)) return;
+      persistField("thresholdRatio", next / 100);
     };
 
     const onCompact = () => {
       setError("");
-      const run = findRunCommand(props, chat);
-      if (run === undefined) {
+      const actions = props.inputActions;
+      if (typeof actions?.setDraft !== "function" || typeof actions.submit !== "function") {
         setError("请在输入框输入 /compact");
         return;
       }
+      const saved = draft;
       setCompacting(true);
-      Promise.resolve(run("compact"))
-        .catch((reason: unknown) => {
-          setError(reason instanceof Error ? reason.message : String(reason));
-        })
-        .finally(() => {
-          setCompacting(false);
-        });
+      try {
+        actions.setDraft("/compact");
+        actions.submit();
+        actions.setDraft(saved);
+      } catch (reason: unknown) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        try {
+          actions.setDraft(saved);
+        } catch {
+          // restore is best-effort
+        }
+      } finally {
+        setCompacting(false);
+      }
     };
 
     const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
@@ -532,18 +476,13 @@ export function apply(ctx: ClientContext): void {
                 step: 5,
                 value: percent,
                 onChange: (event: ChangeEvent<HTMLInputElement>) => {
-                  const next = Number(event.target.value);
-                  setDraftPercent(next);
+                  setDraftPercent(Number(event.currentTarget.value));
                 },
-                onPointerUp: () => {
-                  const next = draftPercent ?? percent;
-                  setDraftPercent(null);
-                  persist({ thresholdRatio: next / 100 });
+                onPointerUp: (event: PointerEvent<HTMLInputElement>) => {
+                  commitThreshold(event.currentTarget.value);
                 },
-                onKeyUp: () => {
-                  const next = draftPercent ?? percent;
-                  setDraftPercent(null);
-                  persist({ thresholdRatio: next / 100 });
+                onKeyUp: (event: KeyboardEvent<HTMLInputElement>) => {
+                  commitThreshold(event.currentTarget.value);
                 },
               }),
               createElement("div", { style: { fontSize: 12 } }, `用到 ${percent}% 时压缩`),

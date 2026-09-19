@@ -10,7 +10,17 @@ import {
   type PointerEvent,
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
+import { compactPreviewNodesFromSession, previewCompactDrop, sessionIdOf } from "../compact-preview.js";
 import { compactButtonStyle, windowSurchargeNote } from "../context-panel-ui.js";
+import {
+  nearestWindowChoice,
+  parseFixesSettings,
+  patchSessionOverride,
+  resolveEffectiveAutoCompact,
+  resolveEffectiveWindow,
+  type FixesSettings,
+  type WindowChoice as StoredWindowChoice,
+} from "../fixes-settings.js";
 
 export const name = "dsh-fixes";
 export const inject = ["slots", "settingsScope"];
@@ -24,13 +34,7 @@ const WINDOW_CHOICES = [
   { tokens: 1000000, label: "1M" },
 ] as const;
 
-type WindowChoice = (typeof WINDOW_CHOICES)[number]["tokens"];
-type Summarization = { provider: string; model: string };
-type FixesSettings = {
-  contextWindows: Record<string, WindowChoice>;
-  summarization: Summarization | null;
-  thresholdRatio: number;
-};
+type WindowChoice = StoredWindowChoice;
 type ModelRef = { provider: string; model: string };
 type CatalogModel = { provider: string; model: string; label: string };
 
@@ -77,11 +81,7 @@ type ClientContext = {
   get?(name: string): unknown;
 };
 
-const DEFAULT_FIXES: FixesSettings = {
-  contextWindows: {},
-  summarization: null,
-  thresholdRatio: 0.4,
-};
+const DEFAULT_FIXES: FixesSettings = parseFixesSettings(undefined);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -91,51 +91,8 @@ function modelKey(provider: string, model: string): string {
   return `${provider}/${model}`;
 }
 
-function clampThresholdRatio(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0.4;
-  if (value < 0.2) return 0.2;
-  if (value > 0.9) return 0.9;
-  return value;
-}
-
-function parseFixesSettings(raw: unknown): FixesSettings {
-  if (!isRecord(raw)) return { contextWindows: {}, summarization: null, thresholdRatio: 0.4 };
-  const contextWindows: Record<string, WindowChoice> = {};
-  if (isRecord(raw.contextWindows)) {
-    for (const [key, tokens] of Object.entries(raw.contextWindows)) {
-      if (typeof tokens === "number" && WINDOW_CHOICES.some((choice) => choice.tokens === tokens)) {
-        contextWindows[key] = tokens as WindowChoice;
-      }
-    }
-  }
-  let summarization: Summarization | null = null;
-  if (isRecord(raw.summarization) && typeof raw.summarization.provider === "string" && typeof raw.summarization.model === "string") {
-    if (raw.summarization.provider.length > 0 && raw.summarization.model.length > 0) {
-      summarization = { provider: raw.summarization.provider, model: raw.summarization.model };
-    }
-  }
-  return {
-    contextWindows,
-    summarization,
-    thresholdRatio: clampThresholdRatio(raw.thresholdRatio),
-  };
-}
-
 function windowLabel(tokens: number | undefined): string {
   return WINDOW_CHOICES.find((choice) => choice.tokens === tokens)?.label ?? "";
-}
-
-function nearestWindowChoice(tokens: number): WindowChoice {
-  let best: WindowChoice = 100000;
-  let bestDelta = Infinity;
-  for (const choice of WINDOW_CHOICES) {
-    const delta = Math.abs(choice.tokens - tokens);
-    if (delta < bestDelta) {
-      best = choice.tokens;
-      bestDelta = delta;
-    }
-  }
-  return best;
 }
 
 function settingsBinder(ctx: ClientContext): SettingsScopeBinder | undefined {
@@ -381,6 +338,41 @@ const errorStyle: CSSProperties = {
   margin: 0,
 };
 
+const noteStyle: CSSProperties = {
+  fontSize: 11,
+  opacity: 0.72,
+  margin: 0,
+  lineHeight: "16px",
+};
+
+function checkboxRow(
+  label: string,
+  checked: boolean,
+  disabled: boolean,
+  onChange: (next: boolean) => void,
+): ReturnType<typeof createElement> {
+  return createElement(
+    "label",
+    {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 12,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      },
+    },
+    createElement("input", {
+      type: "checkbox",
+      checked,
+      disabled,
+      onChange: (event: ChangeEvent<HTMLInputElement>) => onChange(event.currentTarget.checked),
+    }),
+    label,
+  );
+}
+
 export function apply(ctx: ClientContext): void {
   const binder = settingsBinder(ctx);
   const fixesScope = binder?.bind({ namespace: FIXES_NS, decode: parseFixesSettings });
@@ -393,9 +385,9 @@ export function apply(ctx: ClientContext): void {
       : undefined;
     const defaultModel = useScopeValue<unknown>(defaultModelScope, undefined);
     const current = modelFromSelection(selection) ?? readModelPair(defaultModel);
-    const running = typeof props.useSession === "function"
-      ? props.useSession((value) => isRecord(value) && value.running === true) === true
-      : false;
+    const sessionSnapshot = typeof props.useSession === "function" ? props.useSession((value) => value) : undefined;
+    const running = isRecord(sessionSnapshot) && sessionSnapshot.running === true;
+    const sessionId = sessionIdOf(props.sessionId) ?? sessionIdOf(sessionSnapshot);
     const draft = typeof props.useInput === "function"
       ? String(props.useInput((value) => (isRecord(value) && typeof value.draft === "string" ? value.draft : "")) ?? "")
       : "";
@@ -409,6 +401,7 @@ export function apply(ctx: ClientContext): void {
     const [error, setError] = useState("");
     const [compacting, setCompacting] = useState(false);
     const [pressed, setPressed] = useState(false);
+    const [previewOpen, setPreviewOpen] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
     const [popoverPos, setPopoverPos] = useState({ bottom: 72, left: 16 });
     const rootRef = useRef<HTMLDivElement | null>(null);
@@ -484,10 +477,17 @@ export function apply(ctx: ClientContext): void {
       return () => globalThis.clearTimeout(timer);
     }, [compacting, running]);
 
-    const storedWindow = current === undefined ? undefined : fixes.contextWindows[modelKey(current.provider, current.model)];
+    const modelRefKey = current === undefined ? undefined : modelKey(current.provider, current.model);
+    const storedWindow = resolveEffectiveWindow(fixes, sessionId, modelRefKey);
     const catalogWindow = current === undefined ? undefined : catalogContextWindow(piAi, current.provider, current.model);
     const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
     const surchargeNote = windowSurchargeNote(selectedWindow);
+    const sessionWindowOn = sessionId !== undefined && fixes.sessionOverrides[sessionId]?.window !== undefined;
+    const sessionAutoOn = sessionId !== undefined && fixes.sessionOverrides[sessionId]?.autoCompactEnabled !== undefined;
+    const autoEnabled = resolveEffectiveAutoCompact(fixes, sessionId);
+    const previewNodes = compactPreviewNodesFromSession(sessionSnapshot);
+    const preview = previewCompactDrop(previewNodes);
+    const previewLine = previewNodes.length === 0 ? "暂不可预览" : preview.line;
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
     const windowDisabled = false;
     const compactBusy = running || compacting;
@@ -505,7 +505,15 @@ export function apply(ctx: ClientContext): void {
       });
     };
 
+    const persistOverrides = (next: typeof fixes.sessionOverrides) => {
+      persistField("sessionOverrides", next);
+    };
+
     const onWindow = (tokens: WindowChoice) => {
+      if (sessionWindowOn && sessionId !== undefined) {
+        persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { window: tokens }));
+        return;
+      }
       if (current === undefined) {
         setError("无法解析当前模型，窗口改不了");
         return;
@@ -514,6 +522,40 @@ export function apply(ctx: ClientContext): void {
         ...fixes.contextWindows,
         [modelKey(current.provider, current.model)]: tokens,
       });
+    };
+
+    const onSessionWindowOnly = (only: boolean) => {
+      if (sessionId === undefined) return;
+      if (only) {
+        persistOverrides(
+          patchSessionOverride(fixes.sessionOverrides, sessionId, {
+            window: selectedWindow ?? 100000,
+          }),
+        );
+        return;
+      }
+      persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { window: null }));
+    };
+
+    const onAutoEnabled = (enabled: boolean) => {
+      if (sessionAutoOn && sessionId !== undefined) {
+        persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { autoCompactEnabled: enabled }));
+        return;
+      }
+      persistField("autoCompactEnabled", enabled);
+    };
+
+    const onSessionAutoOnly = (only: boolean) => {
+      if (sessionId === undefined) return;
+      if (only) {
+        persistOverrides(
+          patchSessionOverride(fixes.sessionOverrides, sessionId, {
+            autoCompactEnabled: resolveEffectiveAutoCompact(fixes, undefined),
+          }),
+        );
+        return;
+      }
+      persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { autoCompactEnabled: null }));
     };
 
     const onSummarizer = (value: string) => {
@@ -635,6 +677,12 @@ export function apply(ctx: ClientContext): void {
                     surchargeNote,
                   )
                 : null,
+              checkboxRow(
+                "仅当前会话",
+                sessionWindowOn,
+                sessionId === undefined,
+                onSessionWindowOnly,
+              ),
             ),
             createElement(
               "div",
@@ -667,12 +715,15 @@ export function apply(ctx: ClientContext): void {
               "div",
               { style: rowStyle },
               createElement("label", { style: labelStyle }, "自动压缩"),
+              checkboxRow("启用自动压缩", autoEnabled, false, onAutoEnabled),
+              checkboxRow("仅当前会话", sessionAutoOn, sessionId === undefined, onSessionAutoOnly),
               createElement("input", {
                 type: "range",
                 min: 20,
                 max: 90,
                 step: 5,
                 value: percent,
+                disabled: !autoEnabled,
                 onChange: (event: ChangeEvent<HTMLInputElement>) => {
                   setDraftPercent(Number(event.currentTarget.value));
                 },
@@ -683,7 +734,52 @@ export function apply(ctx: ClientContext): void {
                   commitThreshold(event.currentTarget.value);
                 },
               }),
-              createElement("div", { style: { fontSize: 12 } }, `用到 ${percent}% 时压缩`),
+              createElement(
+                "div",
+                { style: { fontSize: 12, opacity: autoEnabled ? 1 : 0.5 } },
+                autoEnabled ? `用到 ${percent}% 时压缩` : "已关闭自动压缩",
+              ),
+            ),
+            createElement(
+              "div",
+              { style: rowStyle },
+              createElement(
+                "button",
+                {
+                  type: "button",
+                  disabled: preview.count === 0,
+                  title: previewLine,
+                  style: {
+                    ...noteStyle,
+                    background: "transparent",
+                    border: 0,
+                    padding: 0,
+                    color: "inherit",
+                    font: "inherit",
+                    textAlign: "left",
+                    cursor: preview.count === 0 ? "default" : "pointer",
+                  },
+                  onClick: () => {
+                    if (preview.count === 0) return;
+                    setPreviewOpen((value) => !value);
+                  },
+                },
+                previewLine,
+              ),
+              previewOpen && preview.count > 0
+                ? createElement(
+                    "div",
+                    { style: { display: "flex", flexDirection: "column", gap: 4, maxHeight: 160, overflow: "auto" } },
+                    ...preview.dropped.map((item) =>
+                      createElement(
+                        "div",
+                        { key: String(item.seq), style: { fontSize: 11, lineHeight: "16px" } },
+                        createElement("strong", null, item.title),
+                        item.excerpt ? ` · ${item.excerpt}` : "",
+                      ),
+                    ),
+                  )
+                : null,
             ),
             createElement(
               "button",
@@ -703,7 +799,7 @@ export function apply(ctx: ClientContext): void {
             ),
             createElement(
               "p",
-              { style: { fontSize: 11, opacity: 0.72, margin: 0, lineHeight: "16px" } },
+              { style: noteStyle },
               "已爆仓的旧会话要先压缩；只改窗口不会缩短已经超长的历史。",
             ),
             error ? createElement("p", { style: errorStyle }, error) : null,

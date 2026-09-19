@@ -99,12 +99,12 @@ Register on `conversation.input.left`. Read session `provider`/`model` from the 
 
 ## Deferred extensions
 
-Recorded 2026-03-22; not in this change.
+Recorded 2026-03-22.
 
-- Show used tokens / window on the Context chip.
-- Toggle to disable auto-compact entirely.
-- Per-session window (currently global per model).
-- Preview which messages compact would drop.
+- Show used tokens / window on the Context chip. **Skipped** — DSH already shows used tokens.
+- Toggle to disable auto-compact entirely. **Done** — global default plus this-session override; isolate `pressure` is suppressed.
+- Per-session window (currently global per model). **Done** — chips stay global; “仅当前会话” writes `sessionOverrides` without mirroring `llm-pi-ai`. Official meter still follows the catalog/global window.
+- Preview which messages compact would drop. **Done** — persistent count line; click to list; compact stays one click.
 
 ## Implementation home
 

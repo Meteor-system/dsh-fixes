@@ -4,12 +4,17 @@ export type AutoCompactInput = {
   thresholdRatio: number;
   busy: boolean;
   locked: boolean;
+  enabled: boolean;
 };
 
 export function shouldAutoCompact(input: AutoCompactInput): boolean {
-  if (input.busy || input.locked) return false;
+  if (!input.enabled || input.busy || input.locked) return false;
   if (!(input.contextWindow > 0) || !(input.estimatedTokens >= 0)) return false;
   return input.estimatedTokens >= input.contextWindow * input.thresholdRatio;
+}
+
+export function shouldRunIsolateCompact(trigger: string): boolean {
+  return trigger !== "pressure";
 }
 
 /** Isolate compaction-basic re-checks its own 0.8 pressure threshold; overflow bypasses it. */

@@ -1,11 +1,15 @@
 import { applyModelWindow } from "./apply-window.js";
-import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact } from "./compaction-policy.js";
+import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact, shouldRunIsolateCompact } from "./compaction-policy.js";
+import { sessionIdOf } from "./compact-preview.js";
 import { shrinkCompactionOptions } from "./compaction-shrink.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
 import {
   FIXES_NAMESPACE,
+  modelKey,
   parseFixesSettings,
+  resolveEffectiveAutoCompact,
+  resolveEffectiveWindow,
   type FixesSettings,
 } from "./fixes-settings.js";
 import { patchProviders } from "./image-input.js";
@@ -144,6 +148,8 @@ fixesSchema.toJSON = () => ({
     contextWindows: { type: "object" },
     summarization: { type: "object" },
     thresholdRatio: { type: "number" },
+    autoCompactEnabled: { type: "boolean" },
+    sessionOverrides: { type: "object" },
   },
 });
 
@@ -292,12 +298,31 @@ type CompactionLike = {
   compactNow?(agent: unknown, signal: AbortSignal, sourceCommandId?: unknown): Promise<unknown>;
 };
 
+const wrappedCompaction = new WeakSet<object>();
+
+function wrapIsolatePressure(compaction: CompactionLike): void {
+  if (compaction.compactIfNeeded === undefined) return;
+  if (wrappedCompaction.has(compaction)) return;
+  const original = compaction.compactIfNeeded.bind(compaction);
+  try {
+    compaction.compactIfNeeded = (agent, trigger, signal) => {
+      if (!shouldRunIsolateCompact(trigger)) return Promise.resolve(null);
+      return original(agent, trigger, signal);
+    };
+    wrappedCompaction.add(compaction);
+  } catch (error) {
+    log("could not wrap compactIfNeeded:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function agentCompaction(agent: CompactAgent): CompactionLike | undefined {
   const get = agent.ctx?.get;
   if (typeof get !== "function") return undefined;
   const compaction = get.call(agent.ctx, "compaction");
   if (!isRecord(compaction)) return undefined;
-  return compaction as CompactionLike;
+  const service = compaction as CompactionLike;
+  wrapIsolatePressure(service);
+  return service;
 }
 
 function abortSignalOf(value: unknown): AbortSignal | undefined {
@@ -357,25 +382,29 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   if (provider === undefined || model === undefined || typeof llm?.resolveModelInfo !== "function") {
     return;
   }
-  let contextWindow: number;
+  let catalogWindow: number | undefined;
   try {
     const info = await llm.resolveModelInfo(provider, model, signal);
     const window = info?.context?.contextWindow;
-    if (typeof window !== "number") return;
-    contextWindow = window;
+    if (typeof window === "number") catalogWindow = window;
   } catch {
-    return;
+    catalogWindow = undefined;
   }
 
   const busy = agent.status !== undefined && agent.status !== "idle" && agent.status !== "running";
   const locked = sessionCompactionLocked(agent.session);
+  const fixes = readFixes(ctx.settings);
+  const sessionId = sessionIdOf(agent.session);
+  const contextWindow = resolveEffectiveWindow(fixes, sessionId, modelKey(provider, model)) ?? catalogWindow;
+  if (typeof contextWindow !== "number") return;
   if (
     !shouldAutoCompact({
       estimatedTokens,
       contextWindow,
-      thresholdRatio: readFixes(ctx.settings).thresholdRatio,
+      thresholdRatio: fixes.thresholdRatio,
       busy,
       locked,
+      enabled: resolveEffectiveAutoCompact(fixes, sessionId),
     })
   ) {
     return;

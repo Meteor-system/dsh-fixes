@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldAutoCompact } from "../src/compaction-policy.ts";
+import { autoCompactTrigger, shouldAutoCompact } from "../src/compaction-policy.ts";
 
 describe("shouldAutoCompact", () => {
   it("fires at or above window * ratio", () => {
@@ -25,5 +25,11 @@ describe("shouldAutoCompact", () => {
     expect(shouldAutoCompact({ ...base, estimatedTokens: 199999 })).toBe(false);
     expect(shouldAutoCompact({ ...base, busy: true })).toBe(false);
     expect(shouldAutoCompact({ ...base, locked: true })).toBe(false);
+  });
+});
+
+describe("autoCompactTrigger", () => {
+  it("uses context-overflow so the slider is not blocked by the engine pressure threshold", () => {
+    expect(autoCompactTrigger()).toBe("context-overflow");
   });
 });

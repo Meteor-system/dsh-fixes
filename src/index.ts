@@ -1,5 +1,5 @@
 import { applyModelWindow } from "./apply-window.js";
-import { shouldAutoCompact } from "./compaction-policy.js";
+import { autoCompactTrigger, shouldAutoCompact } from "./compaction-policy.js";
 import { shrinkCompactionOptions } from "./compaction-shrink.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
@@ -362,7 +362,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   }
 
   try {
-    await compaction.compactIfNeeded(agent, "pressure", signal ?? new AbortController().signal);
+    await compaction.compactIfNeeded(agent, autoCompactTrigger(), signal ?? new AbortController().signal);
   } catch (error) {
     if (isBusyError(error)) return;
     log("auto-compact failed:", error instanceof Error ? error.message : String(error));

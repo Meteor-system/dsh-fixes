@@ -170,32 +170,12 @@ window.__ModuleLoader__.load({
 			if (stored !== void 0) return stored;
 			if (catalogTokens !== void 0) return nearestWindowChoice(catalogTokens);
 		}
-		function lookupCommandsRun(source) {
-			if (!isRecord(source)) return void 0;
-			const direct = source["commands/run"];
-			if (typeof direct === "function") return direct.bind(source);
-			const commands = source.commands;
-			if (isRecord(commands) && typeof commands.run === "function") return commands.run.bind(commands);
-		}
-		function findCommandsRun(ctx, props) {
-			const fromGet = typeof ctx.get === "function" ? ctx.get("commands") : void 0;
-			const fromNamed = typeof ctx.get === "function" ? ctx.get("commands/run") : void 0;
-			if (typeof fromNamed === "function") return fromNamed;
-			return lookupCommandsRun(props) ?? lookupCommandsRun(ctx) ?? lookupCommandsRun(fromGet);
-		}
 		function compactErrorText(reason) {
 			if (!(reason instanceof Error)) return String(reason);
 			const generic = /could not produce|useful summary/i.test(reason.message);
 			const cause = reason.cause instanceof Error ? reason.cause.message : typeof reason.cause === "string" ? reason.cause : void 0;
 			if (generic && cause) return cause;
 			return reason.message;
-		}
-		function resultErrorText(result) {
-			if (!isRecord(result)) return "";
-			if (result.ok === false && typeof result.error === "string") return result.error;
-			if (result.kind === "error" && typeof result.text === "string") return result.text;
-			if (isRecord(result.result) && result.result.kind === "error" && typeof result.result.text === "string") return result.result.text;
-			return "";
 		}
 		function asRecord(value) {
 			return isRecord(value) ? value : void 0;
@@ -238,11 +218,9 @@ window.__ModuleLoader__.load({
 			whiteSpace: "nowrap"
 		};
 		const popoverStyle = {
-			position: "absolute",
-			bottom: "calc(100% + 8px)",
-			left: 0,
-			zIndex: 200,
-			minWidth: 268,
+			position: "fixed",
+			zIndex: 1e4,
+			minWidth: 280,
 			padding: 12,
 			display: "flex",
 			flexDirection: "column",
@@ -251,7 +229,8 @@ window.__ModuleLoader__.load({
 			border: "0.5px solid var(--dsw-alias-border-l4, rgba(127,127,127,0.28))",
 			background: "var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1, #1c1c1c))",
 			color: "var(--dsw-alias-label-primary, inherit)",
-			boxShadow: "0 8px 24px rgba(0,0,0,0.28)"
+			boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+			pointerEvents: "auto"
 		};
 		const rowStyle = {
 			display: "flex",
@@ -327,17 +306,35 @@ window.__ModuleLoader__.load({
 				const [error, setError] = (0, react.useState)("");
 				const [compacting, setCompacting] = (0, react.useState)(false);
 				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
+				const [popoverPos, setPopoverPos] = (0, react.useState)({
+					bottom: 72,
+					left: 16
+				});
 				const rootRef = (0, react.useRef)(null);
+				const popoverRef = (0, react.useRef)(null);
 				const savedDraftRef = (0, react.useRef)(null);
 				const sawRunningRef = (0, react.useRef)(false);
 				const setDraftRef = (0, react.useRef)(props.inputActions?.setDraft);
 				(0, react.useEffect)(() => {
 					if (!open) return;
+					const chip = rootRef.current;
+					if (chip !== null) {
+						const rect = chip.getBoundingClientRect();
+						setPopoverPos({
+							bottom: Math.max(8, window.innerHeight - rect.top + 8),
+							left: Math.max(8, rect.left)
+						});
+					}
 					const onPointer = (event) => {
+						const path = typeof event.composedPath === "function" ? event.composedPath() : [];
 						const root = rootRef.current;
-						if (root === null) return;
-						if ((typeof event.composedPath === "function" ? event.composedPath() : []).includes(root)) return;
-						if (event.target instanceof Node && root.contains(event.target)) return;
+						const popover = popoverRef.current;
+						if (root !== null && path.includes(root)) return;
+						if (popover !== null && path.includes(popover)) return;
+						if (event.target instanceof Node) {
+							if (root !== null && root.contains(event.target)) return;
+							if (popover !== null && popover.contains(event.target)) return;
+						}
 						setOpen(false);
 					};
 					document.addEventListener("pointerdown", onPointer);
@@ -423,40 +420,13 @@ window.__ModuleLoader__.load({
 					persistField("thresholdRatio", next / 100);
 				};
 				const onCompact = () => {
+					setError("正在压缩…");
 					if (compacting) return;
-					setError("");
-					const command = typeof props.command === "function" ? props.command : void 0;
-					if (typeof command === "function") {
-						setCompacting(true);
-						Promise.resolve(command("/compact")).then((result) => {
-							if (result === false) setError("当前会话无法压缩");
-							setCompacting(false);
-						}).catch((reason) => {
-							setError(compactErrorText(reason));
-							setCompacting(false);
-						});
-						return;
-					}
-					const run = findCommandsRun(ctx, props);
-					if (typeof run === "function") {
-						setCompacting(true);
-						Promise.resolve(run("context-compact", props.sessionId)).then((result) => {
-							const text = resultErrorText(result);
-							if (text) {
-								setError(text);
-								setCompacting(false);
-							}
-						}).catch((reason) => {
-							setError(compactErrorText(reason));
-							setCompacting(false);
-						});
-						return;
-					}
 					const actions = props.inputActions;
 					const setDraft = actions?.setDraft;
 					const submit = actions?.submit;
 					if (typeof setDraft !== "function" || typeof submit !== "function") {
-						setError("请在输入框输入 /compact");
+						setError("当前输入框没有 submit，请在输入框手动输入 /compact 回车");
 						return;
 					}
 					const saved = draft;
@@ -464,16 +434,26 @@ window.__ModuleLoader__.load({
 					setCompacting(true);
 					try {
 						setDraft("/compact");
-						submit();
 					} catch (reason) {
 						savedDraftRef.current = null;
 						setError(compactErrorText(reason));
 						setCompacting(false);
-						try {
-							setDraft(saved);
-						} catch {}
 						return;
 					}
+					globalThis.requestAnimationFrame(() => {
+						globalThis.requestAnimationFrame(() => {
+							try {
+								submit();
+								setError("已提交 /compact");
+							} catch (reason) {
+								setError(compactErrorText(reason));
+								setCompacting(false);
+								try {
+									setDraft(saved);
+								} catch {}
+							}
+						});
+					});
 				};
 				const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
 				return (0, react.createElement)("div", {
@@ -489,8 +469,16 @@ window.__ModuleLoader__.load({
 					"aria-haspopup": "dialog",
 					onClick: () => setOpen((value) => !value)
 				}, chipWindow ? `上下文 ${chipWindow}` : "上下文"), open ? (0, react.createElement)("div", {
+					ref: popoverRef,
 					role: "dialog",
-					style: popoverStyle
+					style: {
+						...popoverStyle,
+						bottom: popoverPos.bottom,
+						left: popoverPos.left
+					},
+					onPointerDown: (event) => {
+						event.stopPropagation();
+					}
 				}, (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("div", { style: labelStyle }, "上下文"), (0, react.createElement)("div", { style: choiceRowStyle }, ...WINDOW_CHOICES.map((choice) => (0, react.createElement)("button", {
 					key: choice.label,
 					type: "button",
@@ -531,8 +519,7 @@ window.__ModuleLoader__.load({
 						cursor: compactBusy ? "wait" : "pointer"
 					},
 					title: compactTitle,
-					onPointerDown: (event) => {
-						event.stopPropagation();
+					onClick: () => {
 						onCompact();
 					}
 				}, compacting ? "压缩中…" : "压缩上下文"), (0, react.createElement)("p", { style: {

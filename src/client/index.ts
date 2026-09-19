@@ -304,11 +304,9 @@ const chipStyle: CSSProperties = {
 };
 
 const popoverStyle: CSSProperties = {
-  position: "absolute",
-  bottom: "calc(100% + 8px)",
-  left: 0,
-  zIndex: 200,
-  minWidth: 268,
+  position: "fixed",
+  zIndex: 10000,
+  minWidth: 280,
   padding: 12,
   display: "flex",
   flexDirection: "column",
@@ -318,6 +316,7 @@ const popoverStyle: CSSProperties = {
   background: "var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1, #1c1c1c))",
   color: "var(--dsw-alias-label-primary, inherit)",
   boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+  pointerEvents: "auto",
 };
 
 const rowStyle: CSSProperties = {
@@ -412,19 +411,33 @@ export function apply(ctx: ClientContext): void {
     const [error, setError] = useState("");
     const [compacting, setCompacting] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
+    const [popoverPos, setPopoverPos] = useState({ bottom: 72, left: 16 });
     const rootRef = useRef<HTMLDivElement | null>(null);
+    const popoverRef = useRef<HTMLDivElement | null>(null);
     const savedDraftRef = useRef<string | null>(null);
     const sawRunningRef = useRef(false);
     const setDraftRef = useRef(props.inputActions?.setDraft);
 
     useEffect(() => {
       if (!open) return;
+      const chip = rootRef.current;
+      if (chip !== null) {
+        const rect = chip.getBoundingClientRect();
+        setPopoverPos({
+          bottom: Math.max(8, window.innerHeight - rect.top + 8),
+          left: Math.max(8, rect.left),
+        });
+      }
       const onPointer = (event: globalThis.PointerEvent) => {
-        const root = rootRef.current;
-        if (root === null) return;
         const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-        if (path.includes(root)) return;
-        if (event.target instanceof Node && root.contains(event.target)) return;
+        const root = rootRef.current;
+        const popover = popoverRef.current;
+        if (root !== null && path.includes(root)) return;
+        if (popover !== null && path.includes(popover)) return;
+        if (event.target instanceof Node) {
+          if (root !== null && root.contains(event.target)) return;
+          if (popover !== null && popover.contains(event.target)) return;
+        }
         setOpen(false);
       };
       document.addEventListener("pointerdown", onPointer);
@@ -521,44 +534,13 @@ export function apply(ctx: ClientContext): void {
     };
 
     const onCompact = () => {
+      setError("正在压缩…");
       if (compacting) return;
-      setError("");
-      const command = typeof props.command === "function" ? props.command : undefined;
-      if (typeof command === "function") {
-        setCompacting(true);
-        void Promise.resolve(command("/compact"))
-          .then((result) => {
-            if (result === false) setError("当前会话无法压缩");
-            setCompacting(false);
-          })
-          .catch((reason: unknown) => {
-            setError(compactErrorText(reason));
-            setCompacting(false);
-          });
-        return;
-      }
-      const run = findCommandsRun(ctx, props);
-      if (typeof run === "function") {
-        setCompacting(true);
-        void Promise.resolve(run("context-compact", props.sessionId))
-          .then((result) => {
-            const text = resultErrorText(result);
-            if (text) {
-              setError(text);
-              setCompacting(false);
-            }
-          })
-          .catch((reason: unknown) => {
-            setError(compactErrorText(reason));
-            setCompacting(false);
-          });
-        return;
-      }
       const actions = props.inputActions;
       const setDraft = actions?.setDraft;
       const submit = actions?.submit;
       if (typeof setDraft !== "function" || typeof submit !== "function") {
-        setError("请在输入框输入 /compact");
+        setError("当前输入框没有 submit，请在输入框手动输入 /compact 回车");
         return;
       }
       const saved = draft;
@@ -566,18 +548,28 @@ export function apply(ctx: ClientContext): void {
       setCompacting(true);
       try {
         setDraft("/compact");
-        submit();
       } catch (reason: unknown) {
         savedDraftRef.current = null;
         setError(compactErrorText(reason));
         setCompacting(false);
-        try {
-          setDraft(saved);
-        } catch {
-          // restore is best-effort
-        }
         return;
       }
+      globalThis.requestAnimationFrame(() => {
+        globalThis.requestAnimationFrame(() => {
+          try {
+            submit();
+            setError("已提交 /compact");
+          } catch (reason: unknown) {
+            setError(compactErrorText(reason));
+            setCompacting(false);
+            try {
+              setDraft(saved);
+            } catch {
+              // restore is best-effort
+            }
+          }
+        });
+      });
     };
 
     const summarizerValue = fixes.summarization === null ? "" : modelKey(fixes.summarization.provider, fixes.summarization.model);
@@ -599,7 +591,14 @@ export function apply(ctx: ClientContext): void {
       open
         ? createElement(
             "div",
-            { role: "dialog", style: popoverStyle },
+            {
+              ref: popoverRef,
+              role: "dialog",
+              style: { ...popoverStyle, bottom: popoverPos.bottom, left: popoverPos.left },
+              onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
+                event.stopPropagation();
+              },
+            },
             createElement(
               "div",
               { style: rowStyle },
@@ -678,8 +677,7 @@ export function apply(ctx: ClientContext): void {
                 type: "button",
                 style: { ...compactStyle, opacity: compactBusy ? 0.7 : 1, cursor: compactBusy ? "wait" : "pointer" },
                 title: compactTitle,
-                onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
-                  event.stopPropagation();
+                onClick: () => {
                   onCompact();
                 },
               },

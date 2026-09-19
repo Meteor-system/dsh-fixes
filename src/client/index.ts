@@ -7,6 +7,7 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type KeyboardEvent,
+  type MouseEvent,
   type PointerEvent,
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
@@ -302,7 +303,7 @@ const popoverStyle: CSSProperties = {
   position: "absolute",
   bottom: "calc(100% + 8px)",
   left: 0,
-  zIndex: 40,
+  zIndex: 200,
   minWidth: 268,
   padding: 12,
   display: "flex",
@@ -466,8 +467,8 @@ export function apply(ctx: ClientContext): void {
     const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
     const windowDisabled = current === undefined;
-    const compactDisabled = running || compacting;
-    const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : undefined;
+    const compactBusy = running || compacting;
+    const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
     const chipWindow = windowLabel(selectedWindow);
 
     const persistField = (field: string, value: unknown) => {
@@ -507,7 +508,24 @@ export function apply(ctx: ClientContext): void {
     };
 
     const onCompact = () => {
+      if (compacting) return;
       setError("");
+      const command = typeof (props as { command?: unknown }).command === "function"
+        ? (props as { command: (line: string) => unknown }).command
+        : undefined;
+      if (typeof command === "function") {
+        setCompacting(true);
+        void Promise.resolve(command("/compact"))
+          .then((result) => {
+            if (result === false) setError("当前会话无法压缩");
+            setCompacting(false);
+          })
+          .catch((reason: unknown) => {
+            setError(compactErrorText(reason));
+            setCompacting(false);
+          });
+        return;
+      }
       const run = findCommandsRun(ctx, props);
       if (typeof run === "function") {
         setCompacting(true);
@@ -657,12 +675,19 @@ export function apply(ctx: ClientContext): void {
               "button",
               {
                 type: "button",
-                style: { ...compactStyle, opacity: compactDisabled ? 0.55 : 1, cursor: compactDisabled ? "not-allowed" : "pointer" },
-                disabled: compactDisabled,
+                style: { ...compactStyle, opacity: compactBusy ? 0.7 : 1, cursor: compactBusy ? "wait" : "pointer" },
                 title: compactTitle,
-                onClick: onCompact,
+                onMouseDown: (event: MouseEvent<HTMLButtonElement>) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                },
+                onClick: (event: MouseEvent<HTMLButtonElement>) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onCompact();
+                },
               },
-              "压缩上下文",
+              compacting ? "压缩中…" : "压缩上下文",
             ),
             error ? createElement("p", { style: errorStyle }, error) : null,
           )

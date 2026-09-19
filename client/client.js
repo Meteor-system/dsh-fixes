@@ -241,7 +241,7 @@ window.__ModuleLoader__.load({
 			position: "absolute",
 			bottom: "calc(100% + 8px)",
 			left: 0,
-			zIndex: 40,
+			zIndex: 200,
 			minWidth: 268,
 			padding: 12,
 			display: "flex",
@@ -375,8 +375,8 @@ window.__ModuleLoader__.load({
 				const selectedWindow = selectedWindowTokens(current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)], current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model));
 				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
 				const windowDisabled = current === void 0;
-				const compactDisabled = running || compacting;
-				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : void 0;
+				const compactBusy = running || compacting;
+				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
 				const chipWindow = windowLabel(selectedWindow);
 				const persistField = (field, value) => {
 					if (fixesScope === void 0) {
@@ -414,7 +414,20 @@ window.__ModuleLoader__.load({
 					persistField("thresholdRatio", next / 100);
 				};
 				const onCompact = () => {
+					if (compacting) return;
 					setError("");
+					const command = typeof props.command === "function" ? props.command : void 0;
+					if (typeof command === "function") {
+						setCompacting(true);
+						Promise.resolve(command("/compact")).then((result) => {
+							if (result === false) setError("当前会话无法压缩");
+							setCompacting(false);
+						}).catch((reason) => {
+							setError(compactErrorText(reason));
+							setCompacting(false);
+						});
+						return;
+					}
 					const run = findCommandsRun(ctx, props);
 					if (typeof run === "function") {
 						setCompacting(true);
@@ -513,13 +526,20 @@ window.__ModuleLoader__.load({
 					type: "button",
 					style: {
 						...compactStyle,
-						opacity: compactDisabled ? .55 : 1,
-						cursor: compactDisabled ? "not-allowed" : "pointer"
+						opacity: compactBusy ? .7 : 1,
+						cursor: compactBusy ? "wait" : "pointer"
 					},
-					disabled: compactDisabled,
 					title: compactTitle,
-					onClick: onCompact
-				}, "压缩上下文"), error ? (0, react.createElement)("p", { style: errorStyle }, error) : null) : null);
+					onMouseDown: (event) => {
+						event.preventDefault();
+						event.stopPropagation();
+					},
+					onClick: (event) => {
+						event.preventDefault();
+						event.stopPropagation();
+						onCompact();
+					}
+				}, compacting ? "压缩中…" : "压缩上下文"), error ? (0, react.createElement)("p", { style: errorStyle }, error) : null) : null);
 			}
 			ctx.slots.inject("conversation.input.left", function() {
 				return ctx.slots.register({

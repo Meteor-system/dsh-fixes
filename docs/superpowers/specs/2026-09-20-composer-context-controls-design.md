@@ -97,6 +97,15 @@ Register on `conversation.input.left`. Read session `provider`/`model` from the 
 - Pre-step compact is skipped when below threshold, busy, or locked.
 - Compact-now is session-scoped.
 
+## Deferred extensions
+
+Recorded 2026-03-22; not in this change.
+
+- Show used tokens / window on the Context chip.
+- Toggle to disable auto-compact entirely.
+- Per-session window (currently global per model).
+- Preview which messages compact would drop.
+
 ## Implementation home
 
 All of this stays in `dsh-fixes` (Host + Client). No shipped preset files. No replace of `conversation.input.model`.

@@ -10,6 +10,7 @@ import {
   type PointerEvent,
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
+import { compactButtonStyle, windowSurchargeNote } from "../context-panel-ui.js";
 
 export const name = "dsh-fixes";
 export const inject = ["slots", "settingsScope"];
@@ -369,12 +370,9 @@ const selectStyle: CSSProperties = {
 const compactStyle: CSSProperties = {
   height: 32,
   borderRadius: 8,
-  border: "0.5px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.35))",
-  background: "var(--dsw-alias-button-secondary-fill, transparent)",
-  color: "inherit",
+  border: "0.5px solid transparent",
   font: "inherit",
   fontSize: 12,
-  cursor: "pointer",
 };
 
 const errorStyle: CSSProperties = {
@@ -410,6 +408,7 @@ export function apply(ctx: ClientContext): void {
     const [open, setOpen] = useState(false);
     const [error, setError] = useState("");
     const [compacting, setCompacting] = useState(false);
+    const [pressed, setPressed] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
     const [popoverPos, setPopoverPos] = useState({ bottom: 72, left: 16 });
     const rootRef = useRef<HTMLDivElement | null>(null);
@@ -488,6 +487,7 @@ export function apply(ctx: ClientContext): void {
     const storedWindow = current === undefined ? undefined : fixes.contextWindows[modelKey(current.provider, current.model)];
     const catalogWindow = current === undefined ? undefined : catalogContextWindow(piAi, current.provider, current.model);
     const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
+    const surchargeNote = windowSurchargeNote(selectedWindow);
     const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
     const windowDisabled = false;
     const compactBusy = running || compacting;
@@ -621,6 +621,20 @@ export function apply(ctx: ClientContext): void {
                   ),
                 ),
               ),
+              surchargeNote
+                ? createElement(
+                    "p",
+                    {
+                      style: {
+                        fontSize: 11,
+                        color: "var(--dsw-alias-state-warning-primary, #f59e0b)",
+                        margin: 0,
+                        lineHeight: "16px",
+                      },
+                    },
+                    surchargeNote,
+                  )
+                : null,
             ),
             createElement(
               "div",
@@ -675,8 +689,12 @@ export function apply(ctx: ClientContext): void {
               "button",
               {
                 type: "button",
-                style: { ...compactStyle, opacity: compactBusy ? 0.7 : 1, cursor: compactBusy ? "wait" : "pointer" },
+                style: { ...compactStyle, ...compactButtonStyle({ pressed, busy: compactBusy }) },
                 title: compactTitle,
+                onPointerDown: () => setPressed(true),
+                onPointerUp: () => setPressed(false),
+                onPointerLeave: () => setPressed(false),
+                onPointerCancel: () => setPressed(false),
                 onClick: () => {
                   onCompact();
                 },

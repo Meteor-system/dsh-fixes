@@ -11,5 +11,5 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/client", "src/catalog-groups.ts"]
+  "include": ["src/client", "src/catalog-groups.ts", "src/context-panel-ui.ts"]
 }

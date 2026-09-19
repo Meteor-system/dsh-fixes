@@ -52,7 +52,7 @@ A **Context** chip sits on the composer, immediately left of the official model 
 
 Open the chip to:
 
-- Set a working window for the **current chat model, globally**: `100k` / `200k` / `500k` / `1M`. Every session that uses that model picks up the same window. Models you never touch here keep their existing `llm-pi-ai` window.
+- Set a working window for the **current chat model, globally**: `100k` / `200k` / `500k` / `1M`. Every session that uses that model picks up the same window. Models you never touch here keep their existing `llm-pi-ai` window. Choosing `1M` shows a warning that some models bill extra at that length.
 - Pick one **global summarizer** (`Compact with`) from models already in `llm-pi-ai`. Empty means “use the current chat model”. Compaction summaries go to that cheaper model instead of the chat model.
 - Slide **Auto-compact** between 20% and 90% of that model's window (default 40%). The label is like `Compact at 40% of window`.
 - Press **Compact** to compact **this session only**. The button is disabled while the agent is running or a compaction lock is held.

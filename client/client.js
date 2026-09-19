@@ -26,6 +26,19 @@ window.__ModuleLoader__.load({
 			return groups;
 		}
 		//#endregion
+		//#region src/context-panel-ui.ts
+		function windowSurchargeNote(tokens) {
+			return tokens === 1e6 ? "1M 在部分模型上会额外计费" : null;
+		}
+		function compactButtonStyle(state) {
+			return {
+				background: state.pressed ? "var(--dsw-alias-state-business-primary-active, #1d4ed8)" : "var(--dsw-alias-state-business-primary, #3b82f6)",
+				color: "#fff",
+				opacity: state.busy ? .72 : 1,
+				cursor: state.busy ? "wait" : "pointer"
+			};
+		}
+		//#endregion
 		//#region src/client/index.ts
 		const name = "dsh-fixes";
 		const inject = ["slots", "settingsScope"];
@@ -273,12 +286,9 @@ window.__ModuleLoader__.load({
 		const compactStyle = {
 			height: 32,
 			borderRadius: 8,
-			border: "0.5px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.35))",
-			background: "var(--dsw-alias-button-secondary-fill, transparent)",
-			color: "inherit",
+			border: "0.5px solid transparent",
 			font: "inherit",
-			fontSize: 12,
-			cursor: "pointer"
+			fontSize: 12
 		};
 		const errorStyle = {
 			fontSize: 11,
@@ -305,6 +315,7 @@ window.__ModuleLoader__.load({
 				const [open, setOpen] = (0, react.useState)(false);
 				const [error, setError] = (0, react.useState)("");
 				const [compacting, setCompacting] = (0, react.useState)(false);
+				const [pressed, setPressed] = (0, react.useState)(false);
 				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
 				const [popoverPos, setPopoverPos] = (0, react.useState)({
 					bottom: 72,
@@ -376,6 +387,7 @@ window.__ModuleLoader__.load({
 					return () => globalThis.clearTimeout(timer);
 				}, [compacting, running]);
 				const selectedWindow = selectedWindowTokens(current === void 0 ? void 0 : fixes.contextWindows[modelKey(current.provider, current.model)], current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model));
+				const surchargeNote = windowSurchargeNote(selectedWindow);
 				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
 				const windowDisabled = false;
 				const compactBusy = running || compacting;
@@ -486,7 +498,12 @@ window.__ModuleLoader__.load({
 					title: choice.label,
 					style: choiceStyle(selectedWindow === choice.tokens, windowDisabled),
 					onClick: () => onWindow(choice.tokens)
-				}, choice.label)))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "压缩模型"), (0, react.createElement)("select", {
+				}, choice.label))), surchargeNote ? (0, react.createElement)("p", { style: {
+					fontSize: 11,
+					color: "var(--dsw-alias-state-warning-primary, #f59e0b)",
+					margin: 0,
+					lineHeight: "16px"
+				} }, surchargeNote) : null), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "压缩模型"), (0, react.createElement)("select", {
 					style: selectStyle,
 					value: summarizerValue,
 					onChange: (event) => onSummarizer(event.target.value)
@@ -515,10 +532,16 @@ window.__ModuleLoader__.load({
 					type: "button",
 					style: {
 						...compactStyle,
-						opacity: compactBusy ? .7 : 1,
-						cursor: compactBusy ? "wait" : "pointer"
+						...compactButtonStyle({
+							pressed,
+							busy: compactBusy
+						})
 					},
 					title: compactTitle,
+					onPointerDown: () => setPressed(true),
+					onPointerUp: () => setPressed(false),
+					onPointerLeave: () => setPressed(false),
+					onPointerCancel: () => setPressed(false),
 					onClick: () => {
 						onCompact();
 					}

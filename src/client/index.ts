@@ -9,6 +9,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
+import { groupCatalogByProvider } from "../catalog-groups.js";
 
 export const name = "dsh-fixes";
 export const inject = ["slots", "settingsScope"];
@@ -163,10 +164,21 @@ function catalogFromPiAi(raw: unknown): CatalogModel[] {
       if (seen.has(key)) continue;
       seen.add(key);
       const display = typeof entry.name === "string" && entry.name && entry.name !== model ? entry.name : model;
-      models.push({ provider, model, label: `${provider}/${display}` });
+      models.push({ provider, model, label: display });
     }
   }
   return models;
+}
+
+function providerLabelsFromPiAi(raw: unknown): Record<string, string> {
+  if (!isRecord(raw) || !isRecord(raw.providers)) return {};
+  const labels: Record<string, string> = {};
+  for (const [provider, profile] of Object.entries(raw.providers)) {
+    if (!isRecord(profile)) continue;
+    const named = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
+    labels[provider] = named.length > 0 ? named : provider;
+  }
+  return labels;
 }
 
 function finiteTokens(value: unknown): number | undefined {
@@ -385,6 +397,7 @@ export function apply(ctx: ClientContext): void {
     const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
     const piAi = useScopeValue<unknown>(piAiScope, undefined);
     const catalog = catalogFromPiAi(piAi);
+    const catalogGroups = groupCatalogByProvider(catalog, providerLabelsFromPiAi(piAi));
 
     const [open, setOpen] = useState(false);
     const [error, setError] = useState("");
@@ -603,11 +616,17 @@ export function apply(ctx: ClientContext): void {
                   onChange: (event: ChangeEvent<HTMLSelectElement>) => onSummarizer(event.target.value),
                 },
                 createElement("option", { value: "" }, "当前对话模型"),
-                ...catalog.map((entry) =>
+                ...catalogGroups.map((group) =>
                   createElement(
-                    "option",
-                    { key: modelKey(entry.provider, entry.model), value: modelKey(entry.provider, entry.model) },
-                    entry.label,
+                    "optgroup",
+                    { key: group.provider, label: group.label },
+                    ...group.models.map((entry) =>
+                      createElement(
+                        "option",
+                        { key: modelKey(entry.provider, entry.model), value: modelKey(entry.provider, entry.model) },
+                        entry.label,
+                      ),
+                    ),
                   ),
                 ),
               ),

@@ -5,6 +5,27 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
+		//#region src/catalog-groups.ts
+		function groupCatalogByProvider(catalog, providerLabels = {}) {
+			const groups = [];
+			const index = /* @__PURE__ */ new Map();
+			for (const entry of catalog) {
+				let group = index.get(entry.provider);
+				if (group === void 0) {
+					const named = providerLabels[entry.provider];
+					group = {
+						provider: entry.provider,
+						label: named && named.length > 0 ? named : entry.provider,
+						models: []
+					};
+					index.set(entry.provider, group);
+					groups.push(group);
+				}
+				group.models.push(entry);
+			}
+			return groups;
+		}
+		//#endregion
 		//#region src/client/index.ts
 		const name = "dsh-fixes";
 		const inject = ["slots", "settingsScope"];
@@ -108,11 +129,21 @@ window.__ModuleLoader__.load({
 					models.push({
 						provider,
 						model,
-						label: `${provider}/${display}`
+						label: display
 					});
 				}
 			}
 			return models;
+		}
+		function providerLabelsFromPiAi(raw) {
+			if (!isRecord(raw) || !isRecord(raw.providers)) return {};
+			const labels = {};
+			for (const [provider, profile] of Object.entries(raw.providers)) {
+				if (!isRecord(profile)) continue;
+				const named = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
+				labels[provider] = named.length > 0 ? named : provider;
+			}
+			return labels;
 		}
 		function finiteTokens(value) {
 			return typeof value === "number" && Number.isFinite(value) ? value : void 0;
@@ -288,7 +319,7 @@ window.__ModuleLoader__.load({
 				const draft = typeof props.useInput === "function" ? String(props.useInput((value) => isRecord(value) && typeof value.draft === "string" ? value.draft : "") ?? "") : "";
 				const fixes = useScopeValue(fixesScope, DEFAULT_FIXES);
 				const piAi = useScopeValue(piAiScope, void 0);
-				const catalog = catalogFromPiAi(piAi);
+				const catalogGroups = groupCatalogByProvider(catalogFromPiAi(piAi), providerLabelsFromPiAi(piAi));
 				const [open, setOpen] = (0, react.useState)(false);
 				const [error, setError] = (0, react.useState)("");
 				const [compacting, setCompacting] = (0, react.useState)(false);
@@ -457,10 +488,13 @@ window.__ModuleLoader__.load({
 					style: selectStyle,
 					value: summarizerValue,
 					onChange: (event) => onSummarizer(event.target.value)
-				}, (0, react.createElement)("option", { value: "" }, "当前对话模型"), ...catalog.map((entry) => (0, react.createElement)("option", {
+				}, (0, react.createElement)("option", { value: "" }, "当前对话模型"), ...catalogGroups.map((group) => (0, react.createElement)("optgroup", {
+					key: group.provider,
+					label: group.label
+				}, ...group.models.map((entry) => (0, react.createElement)("option", {
 					key: modelKey(entry.provider, entry.model),
 					value: modelKey(entry.provider, entry.model)
-				}, entry.label)))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "自动压缩"), (0, react.createElement)("input", {
+				}, entry.label)))))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "自动压缩"), (0, react.createElement)("input", {
 					type: "range",
 					min: 20,
 					max: 90,

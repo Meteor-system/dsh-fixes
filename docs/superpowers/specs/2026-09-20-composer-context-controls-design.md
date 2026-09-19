@@ -1,7 +1,7 @@
 # Composer context controls
 
 Date: 2026-09-20  
-Status: draft for review  
+Status: accepted  
 Project: `dsh-fixes`
 
 ## Problem

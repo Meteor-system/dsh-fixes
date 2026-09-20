@@ -11,7 +11,7 @@ import {
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
 import { compactPreviewNodesFromSession, previewCompactDrop, sessionIdOf } from "../compact-preview.js";
-import { compactButtonStyle, windowSurchargeNote } from "../context-panel-ui.js";
+import { compactButtonStyle, contextChipCopy, windowSurchargeNote } from "../context-panel-ui.js";
 import {
   nearestWindowChoice,
   parseFixesSettings,
@@ -89,10 +89,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function modelKey(provider: string, model: string): string {
   return `${provider}/${model}`;
-}
-
-function windowLabel(tokens: number | undefined): string {
-  return WINDOW_CHOICES.find((choice) => choice.tokens === tokens)?.label ?? "";
 }
 
 function settingsBinder(ctx: ClientContext): SettingsScopeBinder | undefined {
@@ -259,6 +255,7 @@ const chipStyle: CSSProperties = {
   lineHeight: "20px",
   cursor: "pointer",
   whiteSpace: "nowrap",
+  flexShrink: 0,
 };
 
 const popoverStyle: CSSProperties = {
@@ -492,7 +489,7 @@ export function apply(ctx: ClientContext): void {
     const windowDisabled = false;
     const compactBusy = running || compacting;
     const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
-    const chipWindow = windowLabel(selectedWindow);
+    const chipCopy = contextChipCopy(selectedWindow);
 
     const persistField = (field: string, value: unknown) => {
       if (fixesScope === undefined) {
@@ -618,17 +615,19 @@ export function apply(ctx: ClientContext): void {
 
     return createElement(
       "div",
-      { ref: rootRef, style: { position: "relative", display: "inline-flex" } },
+      { ref: rootRef, style: { position: "relative", display: "inline-flex", flexShrink: 0 } },
       createElement(
         "button",
         {
           type: "button",
           style: chipStyle,
+          title: chipCopy.title,
+          "aria-label": chipCopy.title,
           "aria-expanded": open,
           "aria-haspopup": "dialog",
           onClick: () => setOpen((value) => !value),
         },
-        chipWindow ? `上下文 ${chipWindow}` : "上下文",
+        chipCopy.label,
       ),
       open
         ? createElement(
@@ -808,10 +807,10 @@ export function apply(ctx: ClientContext): void {
     );
   }
 
-  ctx.slots.inject("conversation.input.left", function () {
+  ctx.slots.inject("conversation.input.right", function () {
     return ctx.slots.register(
       {
-        name: "conversation.input.left",
+        name: "conversation.input.right",
         id: "dsh-fixes-context",
         order: 0,
         label: "Context",

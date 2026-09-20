@@ -48,7 +48,7 @@ Search tries DuckDuckGo's HTML results page first, then falls back to Bing if DD
 
 ## Context controls
 
-A **Context** chip sits on the composer, immediately left of the official model chip. The official model/effort popover is unchanged.
+A **Context** chip sits on the composer, immediately left of the official model chip (the `conversation.input.right` rail). The chip shows only the window (`200k`); hover for `上下文 200k`. The official model/effort popover is unchanged.
 
 Open the chip to:
 

@@ -119,8 +119,25 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/context-panel-ui.ts
+		const WINDOW_LABELS = {
+			1e5: "100k",
+			2e5: "200k",
+			5e5: "500k",
+			1e6: "1M"
+		};
 		function windowSurchargeNote(tokens) {
 			return tokens === 1e6 ? "1M 在部分模型上会额外计费" : null;
+		}
+		function contextChipCopy(tokens) {
+			const window = tokens === void 0 ? void 0 : WINDOW_LABELS[tokens];
+			if (window === void 0) return {
+				label: "上下文",
+				title: "上下文"
+			};
+			return {
+				label: window,
+				title: `上下文 ${window}`
+			};
 		}
 		function compactButtonStyle(state) {
 			return {
@@ -259,9 +276,6 @@ window.__ModuleLoader__.load({
 		function modelKey(provider, model) {
 			return `${provider}/${model}`;
 		}
-		function windowLabel(tokens) {
-			return WINDOW_CHOICES.find((choice) => choice.tokens === tokens)?.label ?? "";
-		}
 		function settingsBinder(ctx) {
 			if (ctx.settingsScope !== void 0 && typeof ctx.settingsScope.bind === "function") return ctx.settingsScope;
 			if (typeof ctx.get === "function") {
@@ -373,7 +387,8 @@ window.__ModuleLoader__.load({
 			fontSize: 12,
 			lineHeight: "20px",
 			cursor: "pointer",
-			whiteSpace: "nowrap"
+			whiteSpace: "nowrap",
+			flexShrink: 0
 		};
 		const popoverStyle = {
 			position: "fixed",
@@ -567,7 +582,7 @@ window.__ModuleLoader__.load({
 				const windowDisabled = false;
 				const compactBusy = running || compacting;
 				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
-				const chipWindow = windowLabel(selectedWindow);
+				const chipCopy = contextChipCopy(selectedWindow);
 				const persistField = (field, value) => {
 					if (fixesScope === void 0) {
 						setError("settings unavailable");
@@ -677,15 +692,18 @@ window.__ModuleLoader__.load({
 					ref: rootRef,
 					style: {
 						position: "relative",
-						display: "inline-flex"
+						display: "inline-flex",
+						flexShrink: 0
 					}
 				}, (0, react.createElement)("button", {
 					type: "button",
 					style: chipStyle,
+					title: chipCopy.title,
+					"aria-label": chipCopy.title,
 					"aria-expanded": open,
 					"aria-haspopup": "dialog",
 					onClick: () => setOpen((value) => !value)
-				}, chipWindow ? `上下文 ${chipWindow}` : "上下文"), open ? (0, react.createElement)("div", {
+				}, chipCopy.label), open ? (0, react.createElement)("div", {
 					ref: popoverRef,
 					role: "dialog",
 					style: {
@@ -786,9 +804,9 @@ window.__ModuleLoader__.load({
 					}
 				}, compacting ? "压缩中…" : "压缩上下文"), (0, react.createElement)("p", { style: noteStyle }, "已爆仓的旧会话要先压缩；只改窗口不会缩短已经超长的历史。"), error ? (0, react.createElement)("p", { style: errorStyle }, error) : null) : null);
 			}
-			ctx.slots.inject("conversation.input.left", function() {
+			ctx.slots.inject("conversation.input.right", function() {
 				return ctx.slots.register({
-					name: "conversation.input.left",
+					name: "conversation.input.right",
 					id: "dsh-fixes-context",
 					order: 0,
 					label: "Context"

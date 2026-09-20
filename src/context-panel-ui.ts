@@ -1,5 +1,18 @@
+const WINDOW_LABELS: Record<number, string> = {
+  100000: "100k",
+  200000: "200k",
+  500000: "500k",
+  1000000: "1M",
+};
+
 export function windowSurchargeNote(tokens: number | undefined): string | null {
   return tokens === 1_000_000 ? "1M 在部分模型上会额外计费" : null;
+}
+
+export function contextChipCopy(tokens: number | undefined): { label: string; title: string } {
+  const window = tokens === undefined ? undefined : WINDOW_LABELS[tokens];
+  if (window === undefined) return { label: "上下文", title: "上下文" };
+  return { label: window, title: `上下文 ${window}` };
 }
 
 export function compactButtonStyle(state: { pressed: boolean; busy: boolean }): {

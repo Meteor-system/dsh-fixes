@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactButtonStyle, windowSurchargeNote } from "../src/context-panel-ui.ts";
+import { compactButtonStyle, contextChipCopy, windowSurchargeNote } from "../src/context-panel-ui.ts";
 
 describe("windowSurchargeNote", () => {
   it("warns only when the selected window is 1M", () => {
@@ -8,6 +8,14 @@ describe("windowSurchargeNote", () => {
     expect(windowSurchargeNote(200_000)).toBeNull();
     expect(windowSurchargeNote(500_000)).toBeNull();
     expect(windowSurchargeNote(undefined)).toBeNull();
+  });
+});
+
+describe("contextChipCopy", () => {
+  it("shows only the window on the chip and the full label in the title", () => {
+    expect(contextChipCopy(200_000)).toEqual({ label: "200k", title: "上下文 200k" });
+    expect(contextChipCopy(1_000_000)).toEqual({ label: "1M", title: "上下文 1M" });
+    expect(contextChipCopy(undefined)).toEqual({ label: "上下文", title: "上下文" });
   });
 });
 

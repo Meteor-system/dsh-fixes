@@ -1,7 +1,7 @@
 {
   "name": "dsh-fixes",
   "version": "0.1.0",
-  "description": "Host-side DeepSeek Harness compatibility fixes. First fix: restore image input for every third-party llm-pi-ai provider that omitted it.",
+  "description": "DeepSeek Harness web-profile plugin: image input and context windows for third-party gateways, free DuckDuckGo search, and composer context controls.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

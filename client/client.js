@@ -126,6 +126,14 @@ window.__ModuleLoader__.load({
 			512e3: "512k",
 			1e6: "1M"
 		};
+		function popoverAnchorStyle() {
+			return {
+				position: "absolute",
+				right: 0,
+				left: "auto",
+				bottom: "calc(100% + 8px)"
+			};
+		}
 		function windowSurchargeNote(tokens) {
 			return tokens === 1e6 ? "1M 在部分模型上会额外计费" : null;
 		}
@@ -397,9 +405,9 @@ window.__ModuleLoader__.load({
 			flexShrink: 0
 		};
 		const popoverStyle = {
-			position: "fixed",
+			...popoverAnchorStyle(),
 			zIndex: 1e4,
-			minWidth: 280,
+			minWidth: 320,
 			padding: 12,
 			display: "flex",
 			flexDirection: "column",
@@ -423,11 +431,12 @@ window.__ModuleLoader__.load({
 		};
 		const choiceRowStyle = {
 			display: "flex",
+			flexWrap: "wrap",
 			gap: 6
 		};
 		function choiceStyle(active, disabled) {
 			return {
-				flex: 1,
+				flex: "1 0 52px",
 				height: 28,
 				border: active ? "0.5px solid var(--dsw-alias-state-business-primary, #3b82f6)" : "0.5px solid var(--dsw-alias-border-l3, rgba(127,127,127,0.35))",
 				borderRadius: 8,
@@ -507,10 +516,6 @@ window.__ModuleLoader__.load({
 				const [pressed, setPressed] = (0, react.useState)(false);
 				const [previewOpen, setPreviewOpen] = (0, react.useState)(false);
 				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
-				const [popoverPos, setPopoverPos] = (0, react.useState)({
-					bottom: 72,
-					left: 16
-				});
 				const rootRef = (0, react.useRef)(null);
 				const popoverRef = (0, react.useRef)(null);
 				const savedDraftRef = (0, react.useRef)(null);
@@ -518,14 +523,6 @@ window.__ModuleLoader__.load({
 				const setDraftRef = (0, react.useRef)(props.inputActions?.setDraft);
 				(0, react.useEffect)(() => {
 					if (!open) return;
-					const chip = rootRef.current;
-					if (chip !== null) {
-						const rect = chip.getBoundingClientRect();
-						setPopoverPos({
-							bottom: Math.max(8, window.innerHeight - rect.top + 8),
-							left: Math.max(8, rect.left)
-						});
-					}
 					const onPointer = (event) => {
 						const path = typeof event.composedPath === "function" ? event.composedPath() : [];
 						const root = rootRef.current;
@@ -712,11 +709,7 @@ window.__ModuleLoader__.load({
 				}, chipCopy.label), open ? (0, react.createElement)("div", {
 					ref: popoverRef,
 					role: "dialog",
-					style: {
-						...popoverStyle,
-						bottom: popoverPos.bottom,
-						left: popoverPos.left
-					},
+					style: popoverStyle,
 					onPointerDown: (event) => {
 						event.stopPropagation();
 					}

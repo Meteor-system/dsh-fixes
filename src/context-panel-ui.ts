@@ -6,6 +6,20 @@ const WINDOW_LABELS: Record<number, string> = {
   1000000: "1M",
 };
 
+export function popoverAnchorStyle(): {
+  position: "absolute";
+  right: number;
+  left: "auto";
+  bottom: string;
+} {
+  return {
+    position: "absolute",
+    right: 0,
+    left: "auto",
+    bottom: "calc(100% + 8px)",
+  };
+}
+
 export function windowSurchargeNote(tokens: number | undefined): string | null {
   return tokens === 1_000_000 ? "1M 在部分模型上会额外计费" : null;
 }

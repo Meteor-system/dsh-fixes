@@ -11,7 +11,7 @@ import {
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
 import { compactPreviewNodesFromSession, previewCompactDrop, sessionIdOf } from "../compact-preview.js";
-import { compactButtonStyle, contextChipCopy, windowSurchargeNote } from "../context-panel-ui.js";
+import { compactButtonStyle, contextChipCopy, popoverAnchorStyle, windowSurchargeNote } from "../context-panel-ui.js";
 import {
   nearestWindowChoice,
   parseFixesSettings,
@@ -260,9 +260,9 @@ const chipStyle: CSSProperties = {
 };
 
 const popoverStyle: CSSProperties = {
-  position: "fixed",
+  ...popoverAnchorStyle(),
   zIndex: 10000,
-  minWidth: 280,
+  minWidth: 320,
   padding: 12,
   display: "flex",
   flexDirection: "column",
@@ -289,12 +289,13 @@ const labelStyle: CSSProperties = {
 
 const choiceRowStyle: CSSProperties = {
   display: "flex",
+  flexWrap: "wrap",
   gap: 6,
 };
 
 function choiceStyle(active: boolean, disabled: boolean): CSSProperties {
   return {
-    flex: 1,
+    flex: "1 0 52px",
     height: 28,
     border: active
       ? "0.5px solid var(--dsw-alias-state-business-primary, #3b82f6)"
@@ -401,7 +402,6 @@ export function apply(ctx: ClientContext): void {
     const [pressed, setPressed] = useState(false);
     const [previewOpen, setPreviewOpen] = useState(false);
     const [draftPercent, setDraftPercent] = useState<number | null>(null);
-    const [popoverPos, setPopoverPos] = useState({ bottom: 72, left: 16 });
     const rootRef = useRef<HTMLDivElement | null>(null);
     const popoverRef = useRef<HTMLDivElement | null>(null);
     const savedDraftRef = useRef<string | null>(null);
@@ -410,14 +410,6 @@ export function apply(ctx: ClientContext): void {
 
     useEffect(() => {
       if (!open) return;
-      const chip = rootRef.current;
-      if (chip !== null) {
-        const rect = chip.getBoundingClientRect();
-        setPopoverPos({
-          bottom: Math.max(8, window.innerHeight - rect.top + 8),
-          left: Math.max(8, rect.left),
-        });
-      }
       const onPointer = (event: globalThis.PointerEvent) => {
         const path = typeof event.composedPath === "function" ? event.composedPath() : [];
         const root = rootRef.current;
@@ -636,7 +628,7 @@ export function apply(ctx: ClientContext): void {
             {
               ref: popoverRef,
               role: "dialog",
-              style: { ...popoverStyle, bottom: popoverPos.bottom, left: popoverPos.left },
+              style: popoverStyle,
               onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
                 event.stopPropagation();
               },

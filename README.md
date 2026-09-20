@@ -40,11 +40,11 @@ Repository: https://github.com/Meteor-system/dsh-fixes
 
 ## Context chip
 
-The chip sits on the **right** of the composer tool row, immediately left of the official model picker. It shows only the window (`200k`); hover for `上下文 200k`, so a long model name is less likely to wrap. The official model/effort popover is unchanged.
+The chip sits on the **right** of the composer tool row, immediately left of the official model picker. It shows only the window (`256k`); hover for `上下文 256k`, so a long model name is less likely to wrap. The official model/effort popover is unchanged.
 
 Inside the popover, top to bottom:
 
-1. **Window** — `100k` / `200k` / `500k` / `1M`. Default: the **current chat model, globally** (also mirrored into `llm-pi-ai`). Check **this session only** to override the current conversation without touching the catalog. Choosing `1M` warns that some models bill extra at that length (no per-model price lookup).
+1. **Window** — `128k` / `256k` / `392k` / `512k` / `1M`. Default: the **current chat model, globally** (also mirrored into `llm-pi-ai`). Check **this session only** to override the current conversation without touching the catalog. Choosing `1M` warns that some models bill extra at that length (no per-model price lookup).
 2. **Summarizer** — models already in `llm-pi-ai`, grouped by provider. Empty = current chat model. Compaction summaries go to this cheaper model.
 3. **Auto-compact** — global toggle, with an optional this-session override. Slider is 20%–90% of the window (default 40%). The slider greys out when auto-compact is off. The isolate engine's own 80% pressure trigger is suppressed so this slider owns auto-compact; provider overflow can still compact as a last resort.
 4. **Preview** — `将压缩 N 条较早消息`. Click to list titles/excerpts that `/compact` would replace. Shows `暂不可预览` when the session snapshot is unavailable.
@@ -73,7 +73,7 @@ Plugin-owned namespace `dsh-fixes`, not mixed into compaction-basic YAML:
 ```yaml
 dsh-fixes:
   contextWindows:
-    routincodex/grok-4.6: 500000
+    routincodex/grok-4.6: 512000
   summarization:
     provider: routincodex
     model: gpt-5.4-mini
@@ -81,13 +81,13 @@ dsh-fixes:
   autoCompactEnabled: true
   sessionOverrides:
     <session-id>:
-      window: 100000
+      window: 128000
       autoCompactEnabled: false
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `contextWindows` | `provider/model` → 100000 / 200000 / 500000 / 1000000 |
+| `contextWindows` | `provider/model` → 128000 / 256000 / 392000 / 512000 / 1000000 |
 | `summarization` | Global summarizer; omit to use the current chat model |
 | `thresholdRatio` | Auto-compact ratio, 0.20–0.90, default 0.40 |
 | `autoCompactEnabled` | Global auto-compact, default `true` |

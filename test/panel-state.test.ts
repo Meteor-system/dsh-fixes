@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { buildPanelState } from "../src/panel-state.ts";
 
 describe("buildPanelState", () => {
-  it("uses a stored 200000 window over the llm 500000 window", () => {
+  it("uses a stored 256000 window over the llm 500000 window", () => {
     expect(
       buildPanelState({
         provider: "routincodex",
         model: "grok-4.6",
         llmContextWindow: 500000,
         fixes: {
-          contextWindows: { "routincodex/grok-4.6": 200000 },
+          contextWindows: { "routincodex/grok-4.6": 256000 },
           summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
           thresholdRatio: 0.35,
           autoCompactEnabled: true,
@@ -20,14 +20,14 @@ describe("buildPanelState", () => {
     ).toEqual({
       provider: "routincodex",
       model: "grok-4.6",
-      window: 200000,
+      window: 256000,
       summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
       thresholdRatio: 0.35,
       models: [{ provider: "routincodex", model: "grok-4.6" }],
     });
   });
 
-  it("snaps a missing stored window from llm 500000 to 500000", () => {
+  it("snaps a missing stored window from llm 500000 to 512000", () => {
     expect(
       buildPanelState({
         provider: "routincodex",
@@ -45,14 +45,14 @@ describe("buildPanelState", () => {
     ).toEqual({
       provider: "routincodex",
       model: "grok-4.6",
-      window: 500000,
+      window: 512000,
       summarization: null,
       thresholdRatio: 0.4,
       models: [],
     });
   });
 
-  it("snaps an unknown catalog window of 262144 to 200000", () => {
+  it("snaps an unknown catalog window of 262144 to 256000", () => {
     expect(
       buildPanelState({
         provider: "routincodex",
@@ -67,7 +67,7 @@ describe("buildPanelState", () => {
         },
         catalog: [],
       }).window,
-    ).toBe(200000);
+    ).toBe(256000);
   });
 
   it("selects no window when stored and catalog windows are both missing", () => {

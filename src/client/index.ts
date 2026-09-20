@@ -28,9 +28,10 @@ export const inject = ["slots", "settingsScope"];
 const FIXES_NS = "dsh-fixes";
 const PI_AI_NS = "llm-pi-ai";
 const WINDOW_CHOICES = [
-  { tokens: 100000, label: "100k" },
-  { tokens: 200000, label: "200k" },
-  { tokens: 500000, label: "500k" },
+  { tokens: 128000, label: "128k" },
+  { tokens: 256000, label: "256k" },
+  { tokens: 392000, label: "392k" },
+  { tokens: 512000, label: "512k" },
   { tokens: 1000000, label: "1M" },
 ] as const;
 
@@ -526,7 +527,7 @@ export function apply(ctx: ClientContext): void {
       if (only) {
         persistOverrides(
           patchSessionOverride(fixes.sessionOverrides, sessionId, {
-            window: selectedWindow ?? 100000,
+            window: selectedWindow ?? 128000,
           }),
         );
         return;

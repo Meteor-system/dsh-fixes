@@ -8,7 +8,7 @@ Project: `dsh-fixes`
 
 Third-party models in `llm-pi-ai` often have the wrong `contextWindow`, so overflow and compaction fire at the wrong time. Users currently have no control next to the composer model chip for:
 
-- declaring a working window (100k / 200k / 500k / 1M)
+- declaring a working window (128k / 256k / 392k / 512k / 1M)
 - picking a cheaper model for compaction summaries
 - choosing when auto-compaction runs
 - compacting the current session without typing `/compact`
@@ -38,7 +38,7 @@ Place a **Context** chip on `conversation.input.left`, immediately beside the of
 
 Popover, top to bottom:
 
-1. **Context** — exclusive choices `100k` / `200k` / `500k` / `1M`. Maps to 100000 / 200000 / 500000 / 1000000 tokens. Highlights the stored window for the current `provider/model`.
+1. **Context** — exclusive choices `128k` / `256k` / `392k` / `512k` / `1M`. Maps to 128000 / 256000 / 392000 / 512000 / 1000000 tokens. Highlights the stored window for the current `provider/model`.
 2. **Compact with** — dropdown of models already in `llm-pi-ai`. Empty means “use the current chat model”. Stores one global `{ provider, model }`.
 3. **Auto-compact** — slider 20%–90%, default 40%, labeled like `Compact at 40% of window`.
 4. **Compact** — button. Disabled while the agent is running or a compaction lock is held. On failure, show the underlying error string, not only “could not produce a useful summary”.

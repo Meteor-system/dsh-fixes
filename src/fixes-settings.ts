@@ -1,5 +1,5 @@
 export const FIXES_NAMESPACE = "dsh-fixes";
-export const WINDOW_CHOICES = [100000, 200000, 500000, 1000000] as const;
+export const WINDOW_CHOICES = [128000, 256000, 392000, 512000, 1000000] as const;
 export type WindowChoice = (typeof WINDOW_CHOICES)[number];
 export type Summarization = { provider: string; model: string };
 export type SessionOverride = {
@@ -26,7 +26,7 @@ export function clampThresholdRatio(value: unknown): number {
 }
 
 export function nearestWindowChoice(tokens: number): WindowChoice {
-  let best: WindowChoice = 100000;
+  let best: WindowChoice = 128000;
   let bestDelta = Infinity;
   for (const choice of WINDOW_CHOICES) {
     const delta = Math.abs(choice - tokens);

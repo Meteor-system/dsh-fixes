@@ -120,9 +120,10 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/context-panel-ui.ts
 		const WINDOW_LABELS = {
-			1e5: "100k",
-			2e5: "200k",
-			5e5: "500k",
+			128e3: "128k",
+			256e3: "256k",
+			392e3: "392k",
+			512e3: "512k",
 			1e6: "1M"
 		};
 		function windowSurchargeNote(tokens) {
@@ -150,9 +151,10 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/fixes-settings.ts
 		const WINDOW_CHOICES$1 = [
-			1e5,
-			2e5,
-			5e5,
+			128e3,
+			256e3,
+			392e3,
+			512e3,
 			1e6
 		];
 		function clampThresholdRatio(value) {
@@ -162,7 +164,7 @@ window.__ModuleLoader__.load({
 			return value;
 		}
 		function nearestWindowChoice(tokens) {
-			let best = 1e5;
+			let best = 128e3;
 			let bestDelta = Infinity;
 			for (const choice of WINDOW_CHOICES$1) {
 				const delta = Math.abs(choice - tokens);
@@ -253,16 +255,20 @@ window.__ModuleLoader__.load({
 		const PI_AI_NS = "llm-pi-ai";
 		const WINDOW_CHOICES = [
 			{
-				tokens: 1e5,
-				label: "100k"
+				tokens: 128e3,
+				label: "128k"
 			},
 			{
-				tokens: 2e5,
-				label: "200k"
+				tokens: 256e3,
+				label: "256k"
 			},
 			{
-				tokens: 5e5,
-				label: "500k"
+				tokens: 392e3,
+				label: "392k"
+			},
+			{
+				tokens: 512e3,
+				label: "512k"
 			},
 			{
 				tokens: 1e6,
@@ -613,7 +619,7 @@ window.__ModuleLoader__.load({
 				const onSessionWindowOnly = (only) => {
 					if (sessionId === void 0) return;
 					if (only) {
-						persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { window: selectedWindow ?? 1e5 }));
+						persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { window: selectedWindow ?? 128e3 }));
 						return;
 					}
 					persistOverrides(patchSessionOverride(fixes.sessionOverrides, sessionId, { window: null }));

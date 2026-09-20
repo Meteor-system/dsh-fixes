@@ -13,7 +13,10 @@ describe("windowSurchargeNote", () => {
 
 describe("contextChipCopy", () => {
   it("shows only the window on the chip and the full label in the title", () => {
-    expect(contextChipCopy(200_000)).toEqual({ label: "200k", title: "上下文 200k" });
+    expect(contextChipCopy(128_000)).toEqual({ label: "128k", title: "上下文 128k" });
+    expect(contextChipCopy(256_000)).toEqual({ label: "256k", title: "上下文 256k" });
+    expect(contextChipCopy(392_000)).toEqual({ label: "392k", title: "上下文 392k" });
+    expect(contextChipCopy(512_000)).toEqual({ label: "512k", title: "上下文 512k" });
     expect(contextChipCopy(1_000_000)).toEqual({ label: "1M", title: "上下文 1M" });
     expect(contextChipCopy(undefined)).toEqual({ label: "上下文", title: "上下文" });
   });

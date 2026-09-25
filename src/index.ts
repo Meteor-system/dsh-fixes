@@ -12,6 +12,16 @@ import {
   sessionAttemptHasVisibleOutput,
   shouldRetryRequestAfterCompaction,
 } from "./compaction-request-retry.js";
+import {
+  MAX_REHYDRATION_FILES,
+  MAX_REHYDRATION_TOKENS,
+  renderRehydrationMessage,
+  selectRecentFileTouches,
+  skillBodiesFromSession,
+  todoItemsFromProjection,
+  type FileTouch,
+  type RehydrationItem,
+} from "./compaction-rehydration.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
 import {
@@ -331,11 +341,42 @@ const latestCompactionProgress = new WeakMap<object, {
   committed: boolean;
   noProgress: boolean;
 }>();
+const fileTouchesByAgent = new WeakMap<object, FileTouch[]>();
+let nextFileTouchOrder = 0;
 
 type CompactionProgressSnapshot = {
   generation?: number;
   tokens?: number;
 };
+
+function executionAborted(value: unknown): boolean {
+  return (typeof AbortSignal !== "undefined" && value instanceof AbortSignal && value.aborted)
+    || isRecord(value) && value.aborted === true;
+}
+
+function recordFileTouch(exec: unknown, result: unknown): void {
+  if (!isRecord(exec) || !isRecord(result) || result.isError !== false || executionAborted(exec.signal)) return;
+  if (exec.name !== "read" && exec.name !== "write" && exec.name !== "edit") return;
+  if (!isRecord(exec.arguments) || typeof exec.arguments.file_path !== "string" || exec.arguments.file_path.length === 0) return;
+  const rootAgent = isRecord(exec.rootAgent) ? exec.rootAgent : isRecord(exec.agent) ? exec.agent : undefined;
+  if (rootAgent === undefined) return;
+  const touches = fileTouchesByAgent.get(rootAgent) ?? [];
+  touches.push({ path: exec.arguments.file_path, order: ++nextFileTouchOrder });
+  fileTouchesByAgent.set(rootAgent, touches);
+}
+
+function installFileTouchLedger(ctx: PluginContext): void {
+  ctx.effect(() => {
+    const disposer = ctx.on(
+      "tools/result",
+      (...args: unknown[]) => recordFileTouch(args[0], args[1]),
+      { global: true },
+    );
+    return () => {
+      if (typeof disposer === "function") disposer();
+    };
+  }, "dsh-fixes: file touch ledger");
+}
 
 function compactionSnapshot(ctx: PluginContext, agent: CompactAgent): CompactionProgressSnapshot {
   const session = agent.session;
@@ -359,7 +400,7 @@ function recordCompactionProgress(
   agent: CompactAgent,
   before: CompactionProgressSnapshot,
   result: unknown,
-): void {
+): { committed: boolean; noProgress: boolean } {
   const after = compactionSnapshot(ctx, agent);
   const generationAdvanced = before.generation !== undefined && after.generation !== undefined
     ? after.generation > before.generation
@@ -367,7 +408,22 @@ function recordCompactionProgress(
   const committed = result !== null && result !== undefined && generationAdvanced;
   const noProgress = !committed
     || before.tokens !== undefined && after.tokens !== undefined && after.tokens >= before.tokens;
-  latestCompactionProgress.set(agent as object, { committed, noProgress });
+  const progress = { committed, noProgress };
+  latestCompactionProgress.set(agent as object, progress);
+  return progress;
+}
+
+async function postCompaction(
+  ctx: PluginContext,
+  agent: CompactAgent,
+  progress: { committed: boolean; noProgress: boolean },
+): Promise<void> {
+  if (!progress.committed) return;
+  try {
+    await rehydrateAfterCompaction(ctx, agent);
+  } catch (error) {
+    log("post-compaction rehydration failed:", error instanceof Error ? error.message : String(error));
+  }
 }
 
 function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): (() => void) | undefined {
@@ -383,10 +439,12 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
         const before = compactionSnapshot(ctx, agent as CompactAgent);
         try {
           const result = await originalIfNeeded(agent, trigger, signal);
-          recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          await postCompaction(ctx, agent as CompactAgent, progress);
           return result;
         } catch (error) {
-          recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          await postCompaction(ctx, agent as CompactAgent, progress);
           throw error;
         }
       };
@@ -397,10 +455,12 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
         const before = compactionSnapshot(ctx, agent as CompactAgent);
         try {
           const result = await originalNow(agent, signal, sourceCommandId);
-          recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          await postCompaction(ctx, agent as CompactAgent, progress);
           return result;
         } catch (error) {
-          recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          await postCompaction(ctx, agent as CompactAgent, progress);
           throw error;
         }
       };
@@ -435,8 +495,92 @@ function agentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): C
   return service;
 }
 
+type FsLike = {
+  resolve?(path: string, options?: { cwd?: string; signal?: AbortSignal }): Promise<{ displayPath?: string }>;
+  stat?(target: unknown, signal?: AbortSignal): Promise<{ type?: string; size?: number } | undefined>;
+  readText?(target: unknown, signal?: AbortSignal): Promise<string>;
+};
+
+type SessionProjectionLike = {
+  stateOf?(session: unknown, key: string): unknown;
+};
+
+type SessionStoreLike = {
+  flush?(session: unknown): Promise<unknown>;
+};
+
+async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent): Promise<void> {
+  const session = agent.session;
+  if (!isRecord(session) || typeof session.append !== "function") return;
+  const touches = fileTouchesByAgent.get(agent as object) ?? [];
+  const items: RehydrationItem[] = [];
+  const fs = ctx.get("fs") as FsLike | undefined;
+  const header = isRecord(session.header) ? session.header : undefined;
+  if (fs?.resolve !== undefined && fs.stat !== undefined && fs.readText !== undefined) {
+    for (const path of selectRecentFileTouches(touches).slice(0, MAX_REHYDRATION_FILES)) {
+      try {
+        const target = await fs.resolve(path, { cwd: typeof header?.cwd === "string" ? header.cwd : undefined });
+        const info = await fs.stat(target);
+        if (info?.type !== "file" || info.size !== undefined && info.size > MAX_REHYDRATION_TOKENS * 4) continue;
+        const text = await fs.readText(target);
+        if (typeof text === "string" && text.length > 0) {
+          items.push({ kind: "file", name: target.displayPath ?? path, text });
+        }
+      } catch {
+        // One missing or unreadable file must not cancel the snapshot.
+      }
+    }
+  }
+
+  const projections = ctx.get("sessionProjections") as SessionProjectionLike | undefined;
+  if (projections?.stateOf !== undefined) {
+    try {
+      const todo = todoItemsFromProjection(projections.stateOf(session, "todos"));
+      if (todo !== undefined) items.push(todo);
+    } catch {
+      // Projection capability is optional and may disappear with its provider.
+    }
+  }
+  items.push(...skillBodiesFromSession(session));
+
+  let message = renderRehydrationMessage(items, MAX_REHYDRATION_TOKENS);
+  const meter = ctx.get("tokenMeter") as TokenMeterLike | undefined;
+  if (message !== undefined && typeof meter?.estimateMessage === "function") {
+    let remaining = items.slice();
+    while (message !== undefined) {
+      let estimate: number | undefined;
+      try {
+        const measured = meter.estimateMessage(message);
+        estimate = typeof measured === "number" && Number.isFinite(measured) ? measured : undefined;
+      } catch {
+        estimate = undefined;
+      }
+      if (estimate === undefined || estimate <= MAX_REHYDRATION_TOKENS || remaining.length === 0) break;
+      remaining = remaining.slice(0, -1);
+      message = renderRehydrationMessage(remaining, MAX_REHYDRATION_TOKENS);
+    }
+  }
+  if (!isRecord(message)) return;
+  const seq = typeof session.seq === "number" ? session.seq : Date.now();
+  const userMessage = { ...message, id: `dsh-fixes-rehydration-${seq}` };
+  try {
+    session.append("user/message", { message: userMessage }, { surfaceOp: "append" });
+  } catch (error) {
+    log("could not append rehydration snapshot:", error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const sessions = ctx.get("sessions") as SessionStoreLike | undefined;
+  if (typeof sessions?.flush === "function") {
+    try {
+      await sessions.flush(session);
+    } catch (error) {
+      log("could not flush rehydration snapshot:", error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
 function abortSignalOf(value: unknown): AbortSignal | undefined {
-  return value instanceof AbortSignal ? value : undefined;
+  return typeof AbortSignal !== "undefined" && value instanceof AbortSignal ? value : undefined;
 }
 
 function isBusyError(error: unknown): boolean {
@@ -447,6 +591,7 @@ function isBusyError(error: unknown): boolean {
 
 type TokenMeterLike = {
   measure(session: unknown): { totalTokens?: number };
+  estimateMessage?(message: unknown): number;
 };
 
 type LlmInfoLike = {
@@ -673,6 +818,7 @@ export function apply(ctx: PluginContext): void {
   installFixesNamespace(ctx);
   installSettingsWatcher(ctx);
   installDuckDuckGoSearch(ctx);
+  installFileTouchLedger(ctx);
   installCompactionRetry(ctx);
   installRequestErrorRetry(ctx);
   installAutoCompact(ctx);

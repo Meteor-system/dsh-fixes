@@ -550,7 +550,7 @@ async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent)
     while (message !== undefined) {
       let estimate: number | undefined;
       try {
-        const measured = meter.estimateMessage(message);
+        const measured = meter.estimateMessage({ ...message, id: "dsh-fixes-rehydration-estimate" });
         estimate = typeof measured === "number" && Number.isFinite(measured) ? measured : undefined;
       } catch {
         estimate = undefined;

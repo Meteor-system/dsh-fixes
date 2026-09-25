@@ -7,7 +7,7 @@ function isRecord(value: unknown): value is RecordValue {
 }
 
 function nonEmpty(value: unknown): boolean {
-  return typeof value === "string" && value.trim().length > 0;
+  return typeof value === "string" && value.length > 0;
 }
 
 function packedRecordHasVisibleOutput(value: unknown): boolean {

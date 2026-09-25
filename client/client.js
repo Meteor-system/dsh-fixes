@@ -26,6 +26,142 @@ window.__ModuleLoader__.load({
 			return groups;
 		}
 		//#endregion
+		//#region src/compaction-budget.ts
+		const DEFAULT_SUMMARY_OUTPUT_TOKENS = 2e4;
+		const DEFAULT_TOOL_RESULT_TOKENS = 13e3;
+		function validReserve(value, fallback) {
+			return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+		}
+		function resolveCompactionBudget(contextWindow, override) {
+			if (!Number.isFinite(contextWindow) || contextWindow <= 0) return void 0;
+			const window = Math.floor(contextWindow);
+			if (window <= 0) return void 0;
+			const summaryOutputTokens = validReserve(override?.summaryOutputTokens, DEFAULT_SUMMARY_OUTPUT_TOKENS);
+			const toolResultTokens = validReserve(override?.toolResultTokens, DEFAULT_TOOL_RESULT_TOKENS);
+			return {
+				contextWindow: window,
+				summaryOutputTokens,
+				toolResultTokens,
+				thresholdTokens: Math.max(Math.floor(window / 2), window - summaryOutputTokens - toolResultTokens)
+			};
+		}
+		//#endregion
+		//#region src/compaction-boundary.ts
+		function isRecord$3(value) {
+			return typeof value === "object" && value !== null && !Array.isArray(value);
+		}
+		function isSequence(value) {
+			return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
+		}
+		function isNonEmptyString(value) {
+			return typeof value === "string" && value.length > 0;
+		}
+		function optionalNonEmptyString(value, key) {
+			return value[key] === void 0 || isNonEmptyString(value[key]);
+		}
+		function optionalSequence(value, key) {
+			return value[key] === void 0 || isSequence(value[key]);
+		}
+		function optionalFormatVersion(value) {
+			return value.formatVersion === void 0 || typeof value.formatVersion === "number" && Number.isSafeInteger(value.formatVersion) && value.formatVersion > 0;
+		}
+		function isCompactBoundarySource(value) {
+			if (!isRecord$3(value) || value.kind !== "plugin" || typeof value.plugin !== "string") return false;
+			if (value.plugin === "compact") return isNonEmptyString(value.compactionId);
+			if (value.plugin !== "compact_boundary") return false;
+			if (!optionalNonEmptyString(value, "boundaryId")) return false;
+			if (!optionalFormatVersion(value)) return false;
+			if (!optionalSequence(value, "coveredStartSeq") || !optionalSequence(value, "coveredEndSeq")) return false;
+			if (value.coveredStartSeq !== void 0 && value.coveredEndSeq !== void 0) {
+				if (value.coveredStartSeq > value.coveredEndSeq) return false;
+			}
+			return true;
+		}
+		function sourceFromValue(value) {
+			if (!isRecord$3(value)) return void 0;
+			const data = value.data;
+			if (isRecord$3(data)) {
+				if (isCompactBoundarySource(data.source)) return data.source;
+				if (isRecord$3(data.message) && isCompactBoundarySource(data.message.source)) return data.message.source;
+			}
+			if (isCompactBoundarySource(value.source)) return value.source;
+		}
+		function boundaryFromSource(seq, source) {
+			if (source.plugin === "compact") return {
+				seq,
+				legacy: true
+			};
+			return {
+				seq,
+				...source.boundaryId === void 0 ? {} : { boundaryId: source.boundaryId },
+				...source.formatVersion === void 0 ? {} : { formatVersion: source.formatVersion },
+				...source.coveredStartSeq === void 0 ? {} : { coveredStartSeq: source.coveredStartSeq },
+				...source.coveredEndSeq === void 0 ? {} : { coveredEndSeq: source.coveredEndSeq },
+				legacy: false
+			};
+		}
+		function surfaceEntries(session) {
+			const surface = isRecord$3(session.surface) ? session.surface : void 0;
+			if (!surface || !Array.isArray(surface.nodes)) return void 0;
+			const eventAt = typeof session.eventAt === "function" ? session.eventAt : void 0;
+			if (eventAt === void 0) return [];
+			const entries = [];
+			for (const [index, value] of surface.nodes.entries()) {
+				if (!isSequence(value)) continue;
+				let event;
+				try {
+					event = eventAt.call(session, value);
+				} catch {
+					event = void 0;
+				}
+				entries.push({
+					seq: value,
+					value: event,
+					index
+				});
+			}
+			return entries;
+		}
+		function messageEntries(session) {
+			if (!Array.isArray(session.messages)) return void 0;
+			const entries = [];
+			for (const [index, value] of session.messages.entries()) {
+				if (!isRecord$3(value)) continue;
+				const seq = isSequence(value.seq) ? value.seq : index;
+				entries.push({
+					seq,
+					value,
+					index
+				});
+			}
+			return entries;
+		}
+		function currentSurfaceEntries(session) {
+			return surfaceEntries(session) ?? messageEntries(session) ?? [];
+		}
+		function currentBoundaryFromEntries(entries) {
+			let active;
+			for (const entry of entries) {
+				const source = sourceFromValue(entry.value);
+				if (isRecord$3(source)) active = boundaryFromSource(entry.seq, source);
+			}
+			return active;
+		}
+		function isSystemMessage(value) {
+			return isRecord$3(value) && value.type === "system/message" || isRecord$3(value) && value.role === "system";
+		}
+		function surfaceCutBeforeBoundary(session) {
+			if (!isRecord$3(session)) return 0;
+			const entries = currentSurfaceEntries(session);
+			if (entries.length === 0) return 0;
+			const systemHead = isSystemMessage(entries[0]?.value) ? 1 : 0;
+			const boundary = currentBoundaryFromEntries(entries);
+			if (boundary === void 0) return systemHead;
+			const boundaryIndex = entries.findIndex((entry) => entry.seq === boundary.seq);
+			if (boundaryIndex < 0) return systemHead;
+			return Math.max(systemHead, boundaryIndex);
+		}
+		//#endregion
 		//#region src/compact-preview.ts
 		const EMPTY_LINE = "没有可压缩的较早消息";
 		const EXCERPT_LIMIT = 80;
@@ -52,14 +188,27 @@ window.__ModuleLoader__.load({
 			if (trimmed.length <= EXCERPT_LIMIT) return trimmed;
 			return trimmed.slice(0, EXCERPT_LIMIT);
 		}
+		function eventSource(event) {
+			if (!isRecord$2(event)) return void 0;
+			const data = isRecord$2(event.data) ? event.data : event;
+			if (isRecord$2(data.source)) return data.source;
+			if (isRecord$2(data.message) && isRecord$2(data.message.source)) return data.message.source;
+		}
 		function eventText(event) {
 			if (!isRecord$2(event)) return "";
 			const data = isRecord$2(event.data) ? event.data : event;
 			if (typeof data.text === "string") return data.text;
 			if (typeof data.content === "string") return data.content;
+			const message = isRecord$2(data.message) ? data.message : data;
+			if (typeof message.content === "string") return message.content;
+			if (Array.isArray(message.content)) return message.content.filter(isRecord$2).map((block) => typeof block.text === "string" ? block.text : "").filter((text) => text.length > 0).join("\\n");
 			return "";
 		}
-		function eventTitle(type) {
+		function eventTitle(type, event) {
+			const source = eventSource(event);
+			if (source?.kind === "plugin" && source.plugin === "compact_boundary") return "压缩边界";
+			if (source?.kind === "plugin" && source.plugin === "compact" && typeof source.compactionId === "string" && source.compactionId.length > 0) return "压缩边界";
+			if (source?.kind === "plugin" && source.plugin === "dsh-fixes" && source.form === "snapshot") return "上下文快照";
 			if (type === "system/message") return "系统";
 			if (type === "user/message") return "用户";
 			if (type === "assistant/message") return "助手";
@@ -73,17 +222,18 @@ window.__ModuleLoader__.load({
 			if (role === "tool") return "tool/result";
 			return role;
 		}
-		function nodesFromMessages(messages) {
+		function nodesFromMessages(messages, cut) {
 			if (!Array.isArray(messages)) return [];
 			const result = [];
 			for (const [index, message] of messages.entries()) {
 				if (!isRecord$2(message)) continue;
 				const role = typeof message.role === "string" ? message.role : "user";
 				const type = role.includes("/") ? role : roleToType(role);
+				if (index !== 0 && index < cut) continue;
 				result.push({
 					seq: typeof message.seq === "number" ? message.seq : index,
 					type,
-					title: eventTitle(type),
+					title: eventTitle(type, message),
 					excerpt: clipExcerpt(eventText(message))
 				});
 			}
@@ -96,20 +246,27 @@ window.__ModuleLoader__.load({
 			const eventAt = typeof session.eventAt === "function" ? session.eventAt : void 0;
 			if (nodes !== void 0 && eventAt !== void 0) {
 				const result = [];
-				for (const seqValue of nodes) {
+				const cut = surfaceCutBeforeBoundary(session);
+				for (const [index, seqValue] of nodes.entries()) {
 					if (typeof seqValue !== "number") continue;
-					const event = eventAt.call(session, seqValue);
+					let event;
+					try {
+						event = eventAt.call(session, seqValue);
+					} catch {
+						event = void 0;
+					}
 					const type = isRecord$2(event) && typeof event.type === "string" ? event.type : "unknown";
+					if (index !== 0 && index < cut) continue;
 					result.push({
 						seq: seqValue,
 						type,
-						title: eventTitle(type),
+						title: eventTitle(type, event),
 						excerpt: clipExcerpt(eventText(event))
 					});
 				}
 				return result;
 			}
-			return nodesFromMessages(session.messages);
+			return nodesFromMessages(session.messages, surfaceCutBeforeBoundary(session));
 		}
 		function sessionIdOf(value) {
 			if (typeof value === "string" && value.length > 0) return value;
@@ -136,6 +293,14 @@ window.__ModuleLoader__.load({
 		}
 		function windowSurchargeNote(tokens) {
 			return tokens === 1e6 ? "1M 在部分模型上会额外计费" : null;
+		}
+		function formatTokenCount(tokens) {
+			if (tokens >= 1e6) return `${Math.round(tokens / 1e5) / 10}M`;
+			return `${Math.round(tokens / 1e3)}k`;
+		}
+		function compactionThresholdLabel(budget) {
+			if (budget === void 0) return "无法计算自动压缩阈值";
+			return `约 ${formatTokenCount(budget.thresholdTokens)} 时压缩（预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
 		}
 		function contextChipCopy(tokens) {
 			const window = tokens === void 0 ? void 0 : WINDOW_LABELS[tokens];
@@ -165,12 +330,6 @@ window.__ModuleLoader__.load({
 			512e3,
 			1e6
 		];
-		function clampThresholdRatio(value) {
-			if (typeof value !== "number" || !Number.isFinite(value)) return .4;
-			if (value < .2) return .2;
-			if (value > .9) return .9;
-			return value;
-		}
 		function nearestWindowChoice(tokens) {
 			let best = 128e3;
 			let bestDelta = Infinity;
@@ -186,6 +345,23 @@ window.__ModuleLoader__.load({
 		function isRecord$1(value) {
 			return typeof value === "object" && value !== null && !Array.isArray(value);
 		}
+		function parseReserveOverride(value) {
+			if (!isRecord$1(value)) return void 0;
+			const override = {};
+			if (typeof value.summaryOutputTokens === "number" && Number.isSafeInteger(value.summaryOutputTokens) && value.summaryOutputTokens >= 0) override.summaryOutputTokens = value.summaryOutputTokens;
+			if (typeof value.toolResultTokens === "number" && Number.isSafeInteger(value.toolResultTokens) && value.toolResultTokens >= 0) override.toolResultTokens = value.toolResultTokens;
+			return override.summaryOutputTokens !== void 0 || override.toolResultTokens !== void 0 ? override : void 0;
+		}
+		function parseCompactionReserves(value) {
+			if (!isRecord$1(value)) return {};
+			const reserves = {};
+			for (const [key, raw] of Object.entries(value)) {
+				if (key.length === 0) continue;
+				const override = parseReserveOverride(raw);
+				if (override !== void 0) reserves[key] = override;
+			}
+			return reserves;
+		}
 		function parseSessionOverride(value) {
 			if (!isRecord$1(value)) return void 0;
 			const override = {};
@@ -197,7 +373,7 @@ window.__ModuleLoader__.load({
 			if (!isRecord$1(raw)) return {
 				contextWindows: {},
 				summarization: null,
-				thresholdRatio: .4,
+				compactionReserves: {},
 				autoCompactEnabled: true,
 				sessionOverrides: {}
 			};
@@ -221,7 +397,7 @@ window.__ModuleLoader__.load({
 			return {
 				contextWindows,
 				summarization,
-				thresholdRatio: clampThresholdRatio(raw.thresholdRatio),
+				compactionReserves: parseCompactionReserves(raw.compactionReserves),
 				autoCompactEnabled: raw.autoCompactEnabled !== false,
 				sessionOverrides
 			};
@@ -515,7 +691,6 @@ window.__ModuleLoader__.load({
 				const [compacting, setCompacting] = (0, react.useState)(false);
 				const [pressed, setPressed] = (0, react.useState)(false);
 				const [previewOpen, setPreviewOpen] = (0, react.useState)(false);
-				const [draftPercent, setDraftPercent] = (0, react.useState)(null);
 				const rootRef = (0, react.useRef)(null);
 				const popoverRef = (0, react.useRef)(null);
 				const savedDraftRef = (0, react.useRef)(null);
@@ -573,7 +748,10 @@ window.__ModuleLoader__.load({
 					}, 2e3);
 					return () => globalThis.clearTimeout(timer);
 				}, [compacting, running]);
-				const selectedWindow = selectedWindowTokens(resolveEffectiveWindow(fixes, sessionId, current === void 0 ? void 0 : modelKey(current.provider, current.model)), current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model));
+				const modelRefKey = current === void 0 ? void 0 : modelKey(current.provider, current.model);
+				const storedWindow = resolveEffectiveWindow(fixes, sessionId, modelRefKey);
+				const catalogWindow = current === void 0 ? void 0 : catalogContextWindow(piAi, current.provider, current.model);
+				const selectedWindow = selectedWindowTokens(storedWindow, catalogWindow);
 				const surchargeNote = windowSurchargeNote(selectedWindow);
 				const sessionWindowOn = sessionId !== void 0 && fixes.sessionOverrides[sessionId]?.window !== void 0;
 				const sessionAutoOn = sessionId !== void 0 && fixes.sessionOverrides[sessionId]?.autoCompactEnabled !== void 0;
@@ -581,8 +759,9 @@ window.__ModuleLoader__.load({
 				const previewNodes = compactPreviewNodesFromSession(sessionSnapshot);
 				const preview = previewCompactDrop(previewNodes);
 				const previewLine = previewNodes.length === 0 ? "暂不可预览" : preview.line;
-				const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
-				const windowDisabled = false;
+				const budgetWindow = storedWindow ?? catalogWindow;
+				const budget = budgetWindow === void 0 ? void 0 : resolveCompactionBudget(budgetWindow, modelRefKey === void 0 ? void 0 : fixes.compactionReserves[modelRefKey]);
+				const windowDisabled = current === void 0;
 				const compactBusy = running || compacting;
 				const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
 				const chipCopy = contextChipCopy(selectedWindow);
@@ -648,12 +827,6 @@ window.__ModuleLoader__.load({
 						model: value.slice(index + 1)
 					});
 				};
-				const commitThreshold = (raw) => {
-					const next = Number(raw);
-					setDraftPercent(null);
-					if (!Number.isFinite(next)) return;
-					persistField("thresholdRatio", next / 100);
-				};
 				const onCompact = () => {
 					setError("正在压缩…");
 					if (compacting) return;
@@ -717,7 +890,7 @@ window.__ModuleLoader__.load({
 					key: choice.label,
 					type: "button",
 					disabled: windowDisabled,
-					title: choice.label,
+					title: windowDisabled ? "当前对话模型未知" : choice.label,
 					style: choiceStyle(selectedWindow === choice.tokens, windowDisabled),
 					onClick: () => onWindow(choice.tokens)
 				}, choice.label))), surchargeNote ? (0, react.createElement)("p", { style: {
@@ -735,26 +908,10 @@ window.__ModuleLoader__.load({
 				}, ...group.models.map((entry) => (0, react.createElement)("option", {
 					key: modelKey(entry.provider, entry.model),
 					value: modelKey(entry.provider, entry.model)
-				}, entry.label)))))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "自动压缩"), checkboxRow("启用自动压缩", autoEnabled, false, onAutoEnabled), checkboxRow("仅当前会话", sessionAutoOn, sessionId === void 0, onSessionAutoOnly), (0, react.createElement)("input", {
-					type: "range",
-					min: 20,
-					max: 90,
-					step: 5,
-					value: percent,
-					disabled: !autoEnabled,
-					onChange: (event) => {
-						setDraftPercent(Number(event.currentTarget.value));
-					},
-					onPointerUp: (event) => {
-						commitThreshold(event.currentTarget.value);
-					},
-					onKeyUp: (event) => {
-						commitThreshold(event.currentTarget.value);
-					}
-				}), (0, react.createElement)("div", { style: {
+				}, entry.label)))))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "自动压缩"), checkboxRow("启用自动压缩", autoEnabled, false, onAutoEnabled), checkboxRow("仅当前会话", sessionAutoOn, sessionId === void 0, onSessionAutoOnly), (0, react.createElement)("div", { style: {
 					fontSize: 12,
 					opacity: autoEnabled ? 1 : .5
-				} }, autoEnabled ? `用到 ${percent}% 时压缩` : "已关闭自动压缩")), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("button", {
+				} }, autoEnabled ? compactionThresholdLabel(budget) : "已关闭自动压缩")), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("button", {
 					type: "button",
 					disabled: preview.count === 0,
 					title: previewLine,

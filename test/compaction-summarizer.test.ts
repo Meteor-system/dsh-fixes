@@ -76,6 +76,7 @@ describe("hasVisibleStreamOutput", () => {
     expect(hasVisibleStreamOutput({ type: "reasoning-delta", text: "thinking" })).toBe(true);
     expect(hasVisibleStreamOutput({ type: "tool-call-delta", id: "call-1", argumentsDelta: "{}" })).toBe(true);
     expect(hasVisibleStreamOutput({ type: "text-delta", text: "" })).toBe(false);
+    expect(hasVisibleStreamOutput({ type: "text-delta", text: " " })).toBe(true);
   });
 });
 

@@ -49,13 +49,13 @@ describe("shouldAutoCompact", () => {
 });
 
 describe("autoCompactTrigger", () => {
-  it("uses context-overflow so the slider is not blocked by the engine pressure threshold", () => {
+  it("uses context-overflow so the reserve formula is not blocked by the engine pressure threshold", () => {
     expect(autoCompactTrigger()).toBe("context-overflow");
   });
 });
 
 describe("shouldRunIsolateCompact", () => {
-  it("never forwards isolate pressure so the slider owns auto-compact", () => {
+  it("never forwards isolate pressure so the reserve formula owns auto-compact", () => {
     expect(shouldRunIsolateCompact("pressure")).toBe(false);
   });
 

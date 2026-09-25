@@ -11,7 +11,13 @@ import {
 import { groupCatalogByProvider } from "../catalog-groups.js";
 import { resolveCompactionBudget } from "../compaction-budget.js";
 import { compactPreviewNodesFromSession, previewCompactDrop, sessionIdOf } from "../compact-preview.js";
-import { compactButtonStyle, contextChipCopy, popoverAnchorStyle, windowSurchargeNote } from "../context-panel-ui.js";
+import {
+  compactButtonStyle,
+  compactionThresholdLabel,
+  contextChipCopy,
+  popoverAnchorStyle,
+  windowSurchargeNote,
+} from "../context-panel-ui.js";
 import {
   nearestWindowChoice,
   parseFixesSettings,
@@ -481,7 +487,7 @@ export function apply(ctx: ClientContext): void {
     const budget = budgetWindow === undefined
       ? undefined
       : resolveCompactionBudget(budgetWindow, modelRefKey === undefined ? undefined : fixes.compactionReserves[modelRefKey]);
-    const windowDisabled = false;
+    const windowDisabled = current === undefined;
     const compactBusy = running || compacting;
     const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
     const chipCopy = contextChipCopy(selectedWindow);
@@ -707,11 +713,7 @@ export function apply(ctx: ClientContext): void {
               createElement(
                 "div",
                 { style: { fontSize: 12, opacity: autoEnabled ? 1 : 0.5 } },
-                autoEnabled
-                  ? budget === undefined
-                    ? "按当前模型窗口计算自动压缩"
-                    : `约 ${Math.round(budget.thresholdTokens / 1000)}k 时压缩（预留摘要 ${Math.round(budget.summaryOutputTokens / 1000)}k + 工具结果 ${Math.round(budget.toolResultTokens / 1000)}k）`
-                  : "已关闭自动压缩",
+                autoEnabled ? compactionThresholdLabel(budget) : "已关闭自动压缩",
               ),
             ),
             createElement(

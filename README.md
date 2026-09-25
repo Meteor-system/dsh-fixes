@@ -13,7 +13,7 @@ It writes host-process settings, so **every session** on that profile picks them
 | Image input | Declares `text` + `image` on every third-party `llm-pi-ai` provider that left input empty or text-only |
 | Context windows | Fills official `contextWindow` / `maxTokens` for known models; other undeclared models get `500000`; explicit numbers are left alone |
 | Free search | Routes `web_search` through DuckDuckGo (Bing HTML fallback) so no DeepSeek key is required |
-| Context chip | Window, summarizer, auto-compact, and one-click compact for the current session, next to the official model picker |
+| Context chip | Window, summarizer, reserve-based auto-compact, boundary preview, and one-click compact for the current session, next to the official model picker |
 
 Uninstalling the plugin does **not** roll back values already written into `llm-pi-ai`.
 
@@ -46,11 +46,13 @@ Inside the popover, top to bottom:
 
 1. **Window** — `128k` / `256k` / `392k` / `512k` / `1M`. Default: the **current chat model, globally** (also mirrored into `llm-pi-ai`). Check **this session only** to override the current conversation without touching the catalog. Choosing `1M` warns that some models bill extra at that length (no per-model price lookup).
 2. **Summarizer** — models already in `llm-pi-ai`, grouped by provider. Empty = current chat model. Compaction summaries go to this cheaper model.
-3. **Auto-compact** — global toggle, with an optional this-session override. Slider is 20%–90% of the window (default 40%). The slider greys out when auto-compact is off. The isolate engine's own 80% pressure trigger is suppressed so this slider owns auto-compact; provider overflow can still compact as a last resort.
-4. **Preview** — `将压缩 N 条较早消息`. Click to list titles/excerpts that `/compact` would replace. Shows `暂不可预览` when the session snapshot is unavailable.
-5. **Compact** — this session only. Bright blue fill, darkens while pressed. Dims and shows `压缩中…` while busy.
+3. **Auto-compact** — global toggle, with an optional this-session override. The panel shows the computed token threshold: `window - 20k summary reserve - 13k tool-result reserve`, floored at half the window. For a 272k window that is 239k; for small windows the half-window floor prevents immediate repeated compaction. The isolate engine's pressure trigger is suppressed so this formula owns normal auto-compact; provider overflow can still compact as a recovery path.
+4. **Preview** — `将压缩 N 条较早消息`. Click to list titles/excerpts from the model-visible surface after the active compaction boundary. Legacy `compact` checkpoints and the new `compact_boundary` marker are recognized; a post-compaction workspace rehydration appears as `上下文快照`. Shows `暂不可预览` when the session snapshot is unavailable.
+5. **Compact** — this session only. Bright blue fill, darkens while pressed. Dims and shows `压缩中…` while busy. A successful compaction appends one snapshot with recent files, current todos, and invoked skill bodies when they fit the budget.
 
-Changing the window does **not** shorten history that is already too long. Overflowed sessions must compact first.
+Changing the window does **not** shorten history that is already too long. Overflowed sessions must compact first. The first summarizer request keeps its complete selected history, including tools and images; if it fails before producing output because the prompt is too long, the plugin removes complete oldest turns and retries once. An original request that overflows follows the same boundary path at most once per turn.
+
+The active boundary is one durable checkpoint message shared by automatic compaction, `/compact`, the preview, and the next model request. Old sessions without that marker remain readable. After a successful boundary, the plugin makes a best-effort snapshot of up to five recently touched files, the latest todo projection, and persisted skill invocation bodies within a 50k-token budget.
 
 ## Other fixes
 
@@ -77,7 +79,10 @@ dsh-fixes:
   summarization:
     provider: routincodex
     model: gpt-5.4-mini
-  thresholdRatio: 0.4
+  compactionReserves:
+    routincodex/grok-4.6:
+      summaryOutputTokens: 20000
+      toolResultTokens: 13000
   autoCompactEnabled: true
   sessionOverrides:
     <session-id>:
@@ -89,7 +94,7 @@ dsh-fixes:
 | --- | --- |
 | `contextWindows` | `provider/model` → 128000 / 256000 / 392000 / 512000 / 1000000 |
 | `summarization` | Global summarizer; omit to use the current chat model |
-| `thresholdRatio` | Auto-compact ratio, 0.20–0.90, default 0.40 |
+| `compactionReserves` | Optional `provider/model` reserve overrides; defaults are 20000 summary-output tokens and 13000 tool-result tokens |
 | `autoCompactEnabled` | Global auto-compact, default `true` |
 | `sessionOverrides` | Per-session window and/or auto-compact |
 
@@ -98,7 +103,7 @@ A global window change also writes the same number onto the matching `llm-pi-ai`
 ## Limits
 
 - The panel does not probe the gateway's true limit. A chosen window larger than the gateway can still overflow.
-- A this-session window only affects this plugin's auto-compact threshold. The official token meter still follows the catalog / global window.
-- If the summarizer is missing credentials, compact fails, history is unchanged, and the panel shows the host error.
+- A this-session window affects this plugin's reserve-based auto-compact threshold; the gateway's true limit is still unknown.
+- If the summarizer is missing credentials, compact fails, history is unchanged, and the panel shows the host error. A failed file read during rehydration is skipped without cancelling compaction.
 - Manual compact is unavailable while the agent is running or a compaction lock is held.
 - The 1M surcharge note is a generic hint, not a per-model price.

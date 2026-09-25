@@ -24,6 +24,20 @@ export function windowSurchargeNote(tokens: number | undefined): string | null {
   return tokens === 1_000_000 ? "1M 在部分模型上会额外计费" : null;
 }
 
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`;
+  return `${Math.round(tokens / 1_000)}k`;
+}
+
+export function compactionThresholdLabel(budget: {
+  thresholdTokens: number;
+  summaryOutputTokens: number;
+  toolResultTokens: number;
+} | undefined): string {
+  if (budget === undefined) return "无法计算自动压缩阈值";
+  return `约 ${formatTokenCount(budget.thresholdTokens)} 时压缩（预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
+}
+
 export function contextChipCopy(tokens: number | undefined): { label: string; title: string } {
   const window = tokens === undefined ? undefined : WINDOW_LABELS[tokens];
   if (window === undefined) return { label: "上下文", title: "上下文" };

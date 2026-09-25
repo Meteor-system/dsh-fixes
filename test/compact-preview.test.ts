@@ -61,6 +61,60 @@ describe("compactPreviewNodesFromSession", () => {
     expect(nodes.map((item) => item.type)).toEqual(["system/message", "user/message", "assistant/message"]);
   });
 
+  it("recognizes a legacy compact checkpoint as the active boundary", () => {
+    const events = [
+      { type: "system/message", data: { text: "system" } },
+      { type: "user/message", data: { text: "old" } },
+      {
+        type: "user/message",
+        data: {
+          message: {
+            source: { kind: "plugin", plugin: "compact", compactionId: "compact-1" },
+            content: [{ type: "text", text: "summary" }],
+          },
+        },
+      },
+      { type: "user/message", data: { text: "new" } },
+    ];
+    const nodes = compactPreviewNodesFromSession({
+      surface: { nodes: [0, 1, 2, 3] },
+      eventAt: (seq: number) => events[seq],
+    });
+    expect(nodes.map((item) => item.seq)).toEqual([0, 2, 3]);
+    expect(nodes[1]?.title).toBe("压缩边界");
+  });
+
+  it("labels a rehydration snapshot after the active boundary", () => {
+    const events = [
+      { type: "system/message" },
+      {
+        type: "user/message",
+        data: {
+          message: {
+            source: { kind: "plugin", plugin: "compact_boundary", boundaryId: "boundary-1" },
+            content: [{ type: "text", text: "summary" }],
+          },
+        },
+      },
+      {
+        type: "user/message",
+        data: {
+          message: {
+            source: { kind: "plugin", plugin: "dsh-fixes", form: "snapshot", sections: [] },
+            content: [{ type: "text", text: "rehydrated" }],
+          },
+        },
+      },
+    ];
+    const nodes = compactPreviewNodesFromSession({
+      surface: { nodes: [0, 1, 2] },
+      eventAt: (seq: number) => events[seq],
+    });
+    expect(nodes[1]?.title).toBe("压缩边界");
+    expect(nodes[2]?.title).toBe("上下文快照");
+    expect(nodes[2]?.excerpt).toContain("rehydrated");
+  });
+
   it("cuts stale surface nodes at the active boundary while preserving the system head", () => {
     const events = [
       { type: "system/message", data: { text: "system" } },

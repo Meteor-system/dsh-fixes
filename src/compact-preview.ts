@@ -40,15 +40,38 @@ function clipExcerpt(text: string): string {
   return trimmed.slice(0, EXCERPT_LIMIT);
 }
 
+function eventSource(event: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(event)) return undefined;
+  const data = isRecord(event.data) ? event.data : event;
+  if (isRecord(data.source)) return data.source;
+  if (isRecord(data.message) && isRecord(data.message.source)) return data.message.source;
+  return undefined;
+}
+
 function eventText(event: unknown): string {
   if (!isRecord(event)) return "";
   const data = isRecord(event.data) ? event.data : event;
   if (typeof data.text === "string") return data.text;
   if (typeof data.content === "string") return data.content;
+  const message = isRecord(data.message) ? data.message : data;
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter(isRecord)
+      .map((block) => (typeof block.text === "string" ? block.text : ""))
+      .filter((text) => text.length > 0)
+      .join("\\n");
+  }
   return "";
 }
 
-function eventTitle(type: string): string {
+function eventTitle(type: string, event?: unknown): string {
+  const source = eventSource(event);
+  if (source?.kind === "plugin" && source.plugin === "compact_boundary") return "压缩边界";
+  if (source?.kind === "plugin" && source.plugin === "compact" && typeof source.compactionId === "string" && source.compactionId.length > 0) {
+    return "压缩边界";
+  }
+  if (source?.kind === "plugin" && source.plugin === "dsh-fixes" && source.form === "snapshot") return "上下文快照";
   if (type === "system/message") return "系统";
   if (type === "user/message") return "用户";
   if (type === "assistant/message") return "助手";
@@ -75,7 +98,7 @@ function nodesFromMessages(messages: unknown, cut: number): CompactPreviewNode[]
     result.push({
       seq: typeof message.seq === "number" ? message.seq : index,
       type,
-      title: eventTitle(type),
+      title: eventTitle(type, message),
       excerpt: clipExcerpt(eventText(message)),
     });
   }
@@ -103,7 +126,7 @@ export function compactPreviewNodesFromSession(session: unknown): CompactPreview
       result.push({
         seq: seqValue,
         type,
-        title: eventTitle(type),
+        title: eventTitle(type, event),
         excerpt: clipExcerpt(eventText(event)),
       });
     }

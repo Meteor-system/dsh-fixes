@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { compactButtonStyle, contextChipCopy, popoverAnchorStyle, windowSurchargeNote } from "../src/context-panel-ui.ts";
+import {
+  compactButtonStyle,
+  compactionThresholdLabel,
+  contextChipCopy,
+  popoverAnchorStyle,
+  windowSurchargeNote,
+} from "../src/context-panel-ui.ts";
+
+describe("compactionThresholdLabel", () => {
+  it("shows the reserve formula threshold", () => {
+    expect(compactionThresholdLabel({
+      thresholdTokens: 239_000,
+      summaryOutputTokens: 20_000,
+      toolResultTokens: 13_000,
+    })).toBe("约 239k 时压缩（预留摘要 20k + 工具结果 13k）");
+  });
+
+  it("explains when the current model window is unavailable", () => {
+    expect(compactionThresholdLabel(undefined)).toBe("无法计算自动压缩阈值");
+  });
+});
 
 describe("windowSurchargeNote", () => {
   it("warns only when the selected window is 1M", () => {

@@ -2,7 +2,11 @@ import { applyModelWindow } from "./apply-window.js";
 import { resolveCompactionBudget } from "./compaction-budget.js";
 import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact, shouldRunIsolateCompact } from "./compaction-policy.js";
 import { sessionIdOf } from "./compact-preview.js";
-import { shrinkCompactionOptions } from "./compaction-shrink.js";
+import {
+  applyCompactionRoute,
+  retryCompactionStream,
+  type CompactionStreamOptions,
+} from "./compaction-summarizer.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
 import {
@@ -243,48 +247,63 @@ function installDuckDuckGoSearch(ctx: PluginContext): void {
   }, "dsh-fixes: duckduckgo search");
 }
 
-function shrinkLiveOptions(ctx: PluginContext, options: unknown) {
-  return shrinkCompactionOptions(
-    options as { purpose?: string; messages?: unknown },
-    undefined,
+function compactionLiveOptions(ctx: PluginContext, options: unknown): unknown {
+  if (!isRecord(options)) return options;
+  return applyCompactionRoute(
+    options as CompactionStreamOptions,
     readFixes(ctx.settings).summarization,
   );
 }
 
-function installCompactionShrink(ctx: PluginContext): void {
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+  return typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
+}
+
+function installCompactionRetry(ctx: PluginContext): void {
   ctx.effect(() => {
     const disposer = ctx.on(
       "llm/stream",
       (...args: unknown[]) => {
-        const options = args[0];
+        const options = compactionLiveOptions(ctx, args[0]);
         const next = args[1];
-        const shrunk = shrinkLiveOptions(ctx, options);
         if (typeof next !== "function") return;
-        return (next as (rewritten?: unknown) => unknown)(shrunk);
+        return (next as (rewritten?: unknown) => unknown)(options);
       },
       { global: true },
     );
     return () => {
       if (typeof disposer === "function") disposer();
     };
-  }, "dsh-fixes: compaction shrink waterfall");
+  }, "dsh-fixes: compaction retry waterfall");
 
-  // Cordis waterfall next() ignores rewritten options and llm.stream closes
-  // over the original request, so the instance wrap is still required.
+  // Cordis waterfall next() does not replace the instance's closed-over request,
+  // so the runtime wrapper is also required for route selection and retry.
   const llm = ctx.get("llm") as { stream: (options: unknown) => unknown } | undefined;
   if (llm === undefined || typeof llm.stream !== "function") {
-    log("llm unavailable; compaction shrink wrap not installed (waterfall still registered)");
+    log("llm unavailable; compaction retry wrap not installed (waterfall still registered)");
     return;
   }
   const runtime = llm;
   ctx.effect(() => {
     const original = runtime.stream.bind(runtime);
-    runtime.stream = (options: unknown) => original(shrinkLiveOptions(ctx, options));
-    log("wrapping llm.stream for overflow-safe compaction");
+    runtime.stream = (options: unknown) => {
+      const routed = compactionLiveOptions(ctx, options);
+      if (!isRecord(routed) || routed.purpose !== "compaction") return original(routed);
+      return retryCompactionStream(
+        (attempt) => {
+          const result = original(attempt);
+          if (!isAsyncIterable(result)) throw new TypeError("llm.stream did not return an async iterable");
+          return result;
+        },
+        routed as CompactionStreamOptions,
+      );
+    };
+    log("wrapping llm.stream for safe compaction retry");
     return () => {
       runtime.stream = original;
     };
-  }, "dsh-fixes: compaction shrink");
+  }, "dsh-fixes: compaction retry");
 }
 
 type CompactAgent = {
@@ -504,7 +523,7 @@ export function apply(ctx: PluginContext): void {
   installFixesNamespace(ctx);
   installSettingsWatcher(ctx);
   installDuckDuckGoSearch(ctx);
-  installCompactionShrink(ctx);
+  installCompactionRetry(ctx);
   installAutoCompact(ctx);
   installContextCommand(ctx);
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  clampThresholdRatio,
   modelKey,
   nearestWindowChoice,
   parseFixesSettings,
@@ -14,26 +13,46 @@ describe("parseFixesSettings", () => {
     expect(parseFixesSettings(undefined)).toEqual({
       contextWindows: {},
       summarization: null,
-      thresholdRatio: 0.4,
+      compactionReserves: {},
       autoCompactEnabled: true,
       sessionOverrides: {},
     });
   });
 
-  it("keeps a stored grok window, summarizer, and slider", () => {
+  it("keeps a stored grok window, summarizer, and route reserve", () => {
     expect(
       parseFixesSettings({
         contextWindows: { "routincodex/grok-4.6": 512000 },
         summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
         thresholdRatio: 0.35,
+        compactionReserves: {
+          "routincodex/grok-4.6": { summaryOutputTokens: 10_000 },
+        },
       }),
     ).toEqual({
       contextWindows: { "routincodex/grok-4.6": 512000 },
       summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
-      thresholdRatio: 0.35,
+      compactionReserves: {
+        "routincodex/grok-4.6": { summaryOutputTokens: 10_000 },
+      },
       autoCompactEnabled: true,
       sessionOverrides: {},
     });
+  });
+
+  it("drops invalid route reserve fields and ignores the legacy ratio", () => {
+    expect(
+      parseFixesSettings({
+        thresholdRatio: 0.2,
+        compactionReserves: {
+          "provider/model": {
+            summaryOutputTokens: -1,
+            toolResultTokens: 12_345,
+          },
+          "provider/empty": { summaryOutputTokens: 1.5 },
+        },
+      }).compactionReserves,
+    ).toEqual({ "provider/model": { toolResultTokens: 12_345 } });
   });
 
   it("drops former 100k/200k/500k window values", () => {
@@ -61,20 +80,12 @@ describe("parseFixesSettings", () => {
     ).toEqual({
       contextWindows: {},
       summarization: null,
-      thresholdRatio: 0.4,
+      compactionReserves: {},
       autoCompactEnabled: false,
       sessionOverrides: {
         "sess-1": { window: 128000, autoCompactEnabled: true },
       },
     });
-  });
-});
-
-describe("clampThresholdRatio", () => {
-  it("clamps and defaults", () => {
-    expect(clampThresholdRatio(0.05)).toBe(0.2);
-    expect(clampThresholdRatio(1)).toBe(0.9);
-    expect(clampThresholdRatio("nope")).toBe(0.4);
   });
 });
 

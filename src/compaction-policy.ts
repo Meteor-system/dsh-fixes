@@ -1,7 +1,7 @@
 export type AutoCompactInput = {
   estimatedTokens: number;
   contextWindow: number;
-  thresholdRatio: number;
+  thresholdTokens: number;
   busy: boolean;
   locked: boolean;
   enabled: boolean;
@@ -9,8 +9,8 @@ export type AutoCompactInput = {
 
 export function shouldAutoCompact(input: AutoCompactInput): boolean {
   if (!input.enabled || input.busy || input.locked) return false;
-  if (!(input.contextWindow > 0) || !(input.estimatedTokens >= 0)) return false;
-  return input.estimatedTokens >= input.contextWindow * input.thresholdRatio;
+  if (!(input.contextWindow > 0) || !(input.estimatedTokens >= 0) || !(input.thresholdTokens >= 0)) return false;
+  return input.estimatedTokens >= input.thresholdTokens;
 }
 
 export function shouldRunIsolateCompact(trigger: string): boolean {

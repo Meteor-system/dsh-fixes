@@ -7,12 +7,12 @@ import {
 } from "../src/compaction-policy.ts";
 
 describe("shouldAutoCompact", () => {
-  it("fires at or above window * ratio", () => {
+  it("fires at or above the resolved token threshold", () => {
     expect(
       shouldAutoCompact({
         estimatedTokens: 200000,
         contextWindow: 500000,
-        thresholdRatio: 0.4,
+        thresholdTokens: 200000,
         busy: false,
         locked: false,
         enabled: true,
@@ -24,7 +24,7 @@ describe("shouldAutoCompact", () => {
     const base = {
       estimatedTokens: 200000,
       contextWindow: 500000,
-      thresholdRatio: 0.4,
+      thresholdTokens: 200000,
       busy: false,
       locked: false,
       enabled: true,
@@ -39,7 +39,7 @@ describe("shouldAutoCompact", () => {
       shouldAutoCompact({
         estimatedTokens: 200000,
         contextWindow: 500000,
-        thresholdRatio: 0.4,
+        thresholdTokens: 200000,
         busy: false,
         locked: false,
         enabled: false,

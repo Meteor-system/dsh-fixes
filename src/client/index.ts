@@ -6,10 +6,10 @@ import {
   useSyncExternalStore,
   type CSSProperties,
   type ChangeEvent,
-  type KeyboardEvent,
   type PointerEvent,
 } from "react";
 import { groupCatalogByProvider } from "../catalog-groups.js";
+import { resolveCompactionBudget } from "../compaction-budget.js";
 import { compactPreviewNodesFromSession, previewCompactDrop, sessionIdOf } from "../compact-preview.js";
 import { compactButtonStyle, contextChipCopy, popoverAnchorStyle, windowSurchargeNote } from "../context-panel-ui.js";
 import {
@@ -401,7 +401,6 @@ export function apply(ctx: ClientContext): void {
     const [compacting, setCompacting] = useState(false);
     const [pressed, setPressed] = useState(false);
     const [previewOpen, setPreviewOpen] = useState(false);
-    const [draftPercent, setDraftPercent] = useState<number | null>(null);
     const rootRef = useRef<HTMLDivElement | null>(null);
     const popoverRef = useRef<HTMLDivElement | null>(null);
     const savedDraftRef = useRef<string | null>(null);
@@ -478,7 +477,10 @@ export function apply(ctx: ClientContext): void {
     const previewNodes = compactPreviewNodesFromSession(sessionSnapshot);
     const preview = previewCompactDrop(previewNodes);
     const previewLine = previewNodes.length === 0 ? "暂不可预览" : preview.line;
-    const percent = draftPercent ?? Math.round(fixes.thresholdRatio * 100);
+    const budgetWindow = storedWindow ?? catalogWindow;
+    const budget = budgetWindow === undefined
+      ? undefined
+      : resolveCompactionBudget(budgetWindow, modelRefKey === undefined ? undefined : fixes.compactionReserves[modelRefKey]);
     const windowDisabled = false;
     const compactBusy = running || compacting;
     const compactTitle = compacting ? "压缩进行中" : running ? "忙碌" : "压缩当前会话";
@@ -556,13 +558,6 @@ export function apply(ctx: ClientContext): void {
       const index = value.indexOf("/");
       if (index <= 0) return;
       persistField("summarization", { provider: value.slice(0, index), model: value.slice(index + 1) });
-    };
-
-    const commitThreshold = (raw: string) => {
-      const next = Number(raw);
-      setDraftPercent(null);
-      if (!Number.isFinite(next)) return;
-      persistField("thresholdRatio", next / 100);
     };
 
     const onCompact = () => {
@@ -709,27 +704,14 @@ export function apply(ctx: ClientContext): void {
               createElement("label", { style: labelStyle }, "自动压缩"),
               checkboxRow("启用自动压缩", autoEnabled, false, onAutoEnabled),
               checkboxRow("仅当前会话", sessionAutoOn, sessionId === undefined, onSessionAutoOnly),
-              createElement("input", {
-                type: "range",
-                min: 20,
-                max: 90,
-                step: 5,
-                value: percent,
-                disabled: !autoEnabled,
-                onChange: (event: ChangeEvent<HTMLInputElement>) => {
-                  setDraftPercent(Number(event.currentTarget.value));
-                },
-                onPointerUp: (event: PointerEvent<HTMLInputElement>) => {
-                  commitThreshold(event.currentTarget.value);
-                },
-                onKeyUp: (event: KeyboardEvent<HTMLInputElement>) => {
-                  commitThreshold(event.currentTarget.value);
-                },
-              }),
               createElement(
                 "div",
                 { style: { fontSize: 12, opacity: autoEnabled ? 1 : 0.5 } },
-                autoEnabled ? `用到 ${percent}% 时压缩` : "已关闭自动压缩",
+                autoEnabled
+                  ? budget === undefined
+                    ? "按当前模型窗口计算自动压缩"
+                    : `约 ${Math.round(budget.thresholdTokens / 1000)}k 时压缩（预留摘要 ${Math.round(budget.summaryOutputTokens / 1000)}k + 工具结果 ${Math.round(budget.toolResultTokens / 1000)}k）`
+                  : "已关闭自动压缩",
               ),
             ),
             createElement(

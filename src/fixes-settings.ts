@@ -1,3 +1,5 @@
+import type { CompactionReserveOverride } from "./compaction-budget.js";
+
 export const FIXES_NAMESPACE = "dsh-fixes";
 export const WINDOW_CHOICES = [128000, 256000, 392000, 512000, 1000000] as const;
 export type WindowChoice = (typeof WINDOW_CHOICES)[number];
@@ -9,20 +11,13 @@ export type SessionOverride = {
 export type FixesSettings = {
   contextWindows: Record<string, WindowChoice>;
   summarization: Summarization | null;
-  thresholdRatio: number;
+  compactionReserves: Record<string, CompactionReserveOverride>;
   autoCompactEnabled: boolean;
   sessionOverrides: Record<string, SessionOverride>;
 };
 
 export function modelKey(provider: string, model: string): string {
   return `${provider}/${model}`;
-}
-
-export function clampThresholdRatio(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0.4;
-  if (value < 0.2) return 0.2;
-  if (value > 0.9) return 0.9;
-  return value;
 }
 
 export function nearestWindowChoice(tokens: number): WindowChoice {
@@ -42,6 +37,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseReserveOverride(value: unknown): CompactionReserveOverride | undefined {
+  if (!isRecord(value)) return undefined;
+  const override: CompactionReserveOverride = {};
+  if (typeof value.summaryOutputTokens === "number" && Number.isSafeInteger(value.summaryOutputTokens) && value.summaryOutputTokens >= 0) {
+    override.summaryOutputTokens = value.summaryOutputTokens;
+  }
+  if (typeof value.toolResultTokens === "number" && Number.isSafeInteger(value.toolResultTokens) && value.toolResultTokens >= 0) {
+    override.toolResultTokens = value.toolResultTokens;
+  }
+  return override.summaryOutputTokens !== undefined || override.toolResultTokens !== undefined ? override : undefined;
+}
+
+function parseCompactionReserves(value: unknown): Record<string, CompactionReserveOverride> {
+  if (!isRecord(value)) return {};
+  const reserves: Record<string, CompactionReserveOverride> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (key.length === 0) continue;
+    const override = parseReserveOverride(raw);
+    if (override !== undefined) reserves[key] = override;
+  }
+  return reserves;
+}
+
 function parseSessionOverride(value: unknown): SessionOverride | undefined {
   if (!isRecord(value)) return undefined;
   const override: SessionOverride = {};
@@ -59,7 +77,7 @@ export function parseFixesSettings(raw: unknown): FixesSettings {
     return {
       contextWindows: {},
       summarization: null,
-      thresholdRatio: 0.4,
+      compactionReserves: {},
       autoCompactEnabled: true,
       sessionOverrides: {},
     };
@@ -89,7 +107,7 @@ export function parseFixesSettings(raw: unknown): FixesSettings {
   return {
     contextWindows,
     summarization,
-    thresholdRatio: clampThresholdRatio(raw.thresholdRatio),
+    compactionReserves: parseCompactionReserves(raw.compactionReserves),
     autoCompactEnabled: raw.autoCompactEnabled !== false,
     sessionOverrides,
   };

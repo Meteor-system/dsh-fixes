@@ -1,4 +1,5 @@
 import { applyModelWindow } from "./apply-window.js";
+import { resolveCompactionBudget } from "./compaction-budget.js";
 import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact, shouldRunIsolateCompact } from "./compaction-policy.js";
 import { sessionIdOf } from "./compact-preview.js";
 import { shrinkCompactionOptions } from "./compaction-shrink.js";
@@ -147,7 +148,7 @@ fixesSchema.toJSON = () => ({
   properties: {
     contextWindows: { type: "object" },
     summarization: { type: "object" },
-    thresholdRatio: { type: "number" },
+    compactionReserves: { type: "object" },
     autoCompactEnabled: { type: "boolean" },
     sessionOverrides: { type: "object" },
   },
@@ -395,13 +396,17 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   const locked = sessionCompactionLocked(agent.session);
   const fixes = readFixes(ctx.settings);
   const sessionId = sessionIdOf(agent.session);
-  const contextWindow = resolveEffectiveWindow(fixes, sessionId, modelKey(provider, model)) ?? catalogWindow;
-  if (typeof contextWindow !== "number") return;
+  const routeKey = modelKey(provider, model);
+  const contextWindow = resolveEffectiveWindow(fixes, sessionId, routeKey) ?? catalogWindow;
+  const budget = typeof contextWindow === "number"
+    ? resolveCompactionBudget(contextWindow, fixes.compactionReserves[routeKey])
+    : undefined;
+  if (budget === undefined) return;
   if (
     !shouldAutoCompact({
       estimatedTokens,
-      contextWindow,
-      thresholdRatio: fixes.thresholdRatio,
+      contextWindow: budget.contextWindow,
+      thresholdTokens: budget.thresholdTokens,
       busy,
       locked,
       enabled: resolveEffectiveAutoCompact(fixes, sessionId),

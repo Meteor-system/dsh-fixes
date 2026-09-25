@@ -5,7 +5,6 @@ export type PanelState = {
   model: string;
   window: WindowChoice | undefined;
   summarization: { provider: string; model: string } | null;
-  thresholdRatio: number;
   models: Array<{ provider: string; model: string }>;
 };
 
@@ -34,7 +33,6 @@ export function buildPanelState(input: {
     model: input.model,
     window: resolveSelectedWindow(stored, input.llmContextWindow),
     summarization: input.fixes.summarization,
-    thresholdRatio: input.fixes.thresholdRatio,
     models: input.catalog,
   };
 }

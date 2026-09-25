@@ -11,7 +11,7 @@ describe("buildPanelState", () => {
         fixes: {
           contextWindows: { "routincodex/grok-4.6": 256000 },
           summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
-          thresholdRatio: 0.35,
+          compactionReserves: {},
           autoCompactEnabled: true,
           sessionOverrides: {},
         },
@@ -22,7 +22,6 @@ describe("buildPanelState", () => {
       model: "grok-4.6",
       window: 256000,
       summarization: { provider: "routincodex", model: "gpt-5.4-mini" },
-      thresholdRatio: 0.35,
       models: [{ provider: "routincodex", model: "grok-4.6" }],
     });
   });
@@ -36,7 +35,7 @@ describe("buildPanelState", () => {
         fixes: {
           contextWindows: {},
           summarization: null,
-          thresholdRatio: 0.4,
+          compactionReserves: {},
           autoCompactEnabled: true,
           sessionOverrides: {},
         },
@@ -47,7 +46,6 @@ describe("buildPanelState", () => {
       model: "grok-4.6",
       window: 512000,
       summarization: null,
-      thresholdRatio: 0.4,
       models: [],
     });
   });
@@ -61,13 +59,29 @@ describe("buildPanelState", () => {
         fixes: {
           contextWindows: {},
           summarization: null,
-          thresholdRatio: 0.4,
+          compactionReserves: {},
           autoCompactEnabled: true,
           sessionOverrides: {},
         },
         catalog: [],
       }).window,
     ).toBe(256000);
+  });
+
+  it("does not expose the removed threshold ratio", () => {
+    const state = buildPanelState({
+      provider: "routincodex",
+      model: "grok-4.6",
+      fixes: {
+        contextWindows: {},
+        summarization: null,
+        compactionReserves: {},
+        autoCompactEnabled: true,
+        sessionOverrides: {},
+      },
+      catalog: [],
+    });
+    expect(Object.hasOwn(state, "thresholdRatio")).toBe(false);
   });
 
   it("selects no window when stored and catalog windows are both missing", () => {
@@ -78,7 +92,7 @@ describe("buildPanelState", () => {
         fixes: {
           contextWindows: {},
           summarization: null,
-          thresholdRatio: 0.4,
+          compactionReserves: {},
           autoCompactEnabled: true,
           sessionOverrides: {},
         },

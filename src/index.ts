@@ -7,6 +7,11 @@ import {
   retryCompactionStream,
   type CompactionStreamOptions,
 } from "./compaction-summarizer.js";
+import {
+  createCompactionRetryGate,
+  sessionAttemptHasVisibleOutput,
+  shouldRetryRequestAfterCompaction,
+} from "./compaction-request-retry.js";
 import { patchContextWindows } from "./context-window.js";
 import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
 import {
@@ -318,30 +323,115 @@ type CompactionLike = {
   compactNow?(agent: unknown, signal: AbortSignal, sourceCommandId?: unknown): Promise<unknown>;
 };
 
-const wrappedCompaction = new WeakSet<object>();
+const wrappedCompaction = new WeakMap<object, {
+  originalIfNeeded?: (agent: unknown, trigger: string, signal: AbortSignal) => Promise<unknown>;
+  originalNow?: (agent: unknown, signal: AbortSignal, sourceCommandId?: unknown) => Promise<unknown>;
+}>();
+const latestCompactionProgress = new WeakMap<object, {
+  committed: boolean;
+  noProgress: boolean;
+}>();
 
-function wrapIsolatePressure(compaction: CompactionLike): void {
-  if (compaction.compactIfNeeded === undefined) return;
-  if (wrappedCompaction.has(compaction)) return;
-  const original = compaction.compactIfNeeded.bind(compaction);
-  try {
-    compaction.compactIfNeeded = (agent, trigger, signal) => {
-      if (!shouldRunIsolateCompact(trigger)) return Promise.resolve(null);
-      return original(agent, trigger, signal);
-    };
-    wrappedCompaction.add(compaction);
-  } catch (error) {
-    log("could not wrap compactIfNeeded:", error instanceof Error ? error.message : String(error));
+type CompactionProgressSnapshot = {
+  generation?: number;
+  tokens?: number;
+};
+
+function compactionSnapshot(ctx: PluginContext, agent: CompactAgent): CompactionProgressSnapshot {
+  const session = agent.session;
+  const surface = isRecord(session) && isRecord(session.surface) ? session.surface : undefined;
+  const generation = typeof surface?.replaceGeneration === "number" ? surface.replaceGeneration : undefined;
+  let tokens: number | undefined;
+  const meter = ctx.get("tokenMeter") as TokenMeterLike | undefined;
+  if (meter !== undefined && typeof meter.measure === "function" && session !== undefined) {
+    try {
+      const measured = meter.measure(session);
+      if (typeof measured?.totalTokens === "number" && Number.isFinite(measured.totalTokens)) tokens = measured.totalTokens;
+    } catch {
+      tokens = undefined;
+    }
   }
+  return { generation, tokens };
 }
 
-function agentCompaction(agent: CompactAgent): CompactionLike | undefined {
+function recordCompactionProgress(
+  ctx: PluginContext,
+  agent: CompactAgent,
+  before: CompactionProgressSnapshot,
+  result: unknown,
+): void {
+  const after = compactionSnapshot(ctx, agent);
+  const generationAdvanced = before.generation !== undefined && after.generation !== undefined
+    ? after.generation > before.generation
+    : true;
+  const committed = result !== null && result !== undefined && generationAdvanced;
+  const noProgress = !committed
+    || before.tokens !== undefined && after.tokens !== undefined && after.tokens >= before.tokens;
+  latestCompactionProgress.set(agent as object, { committed, noProgress });
+}
+
+function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): (() => void) | undefined {
+  if (wrappedCompaction.has(compaction)) return undefined;
+  const originalIfNeeded = compaction.compactIfNeeded?.bind(compaction);
+  const originalNow = compaction.compactNow?.bind(compaction);
+  let wrapperIfNeeded: CompactionLike["compactIfNeeded"];
+  let wrapperNow: CompactionLike["compactNow"];
+  try {
+    if (originalIfNeeded !== undefined) {
+      wrapperIfNeeded = async (agent, trigger, signal) => {
+        if (!shouldRunIsolateCompact(trigger)) return null;
+        const before = compactionSnapshot(ctx, agent as CompactAgent);
+        try {
+          const result = await originalIfNeeded(agent, trigger, signal);
+          recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          return result;
+        } catch (error) {
+          recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          throw error;
+        }
+      };
+      compaction.compactIfNeeded = wrapperIfNeeded;
+    }
+    if (originalNow !== undefined) {
+      wrapperNow = async (agent, signal, sourceCommandId) => {
+        const before = compactionSnapshot(ctx, agent as CompactAgent);
+        try {
+          const result = await originalNow(agent, signal, sourceCommandId);
+          recordCompactionProgress(ctx, agent as CompactAgent, before, result);
+          return result;
+        } catch (error) {
+          recordCompactionProgress(ctx, agent as CompactAgent, before, {});
+          throw error;
+        }
+      };
+      compaction.compactNow = wrapperNow;
+    }
+    wrappedCompaction.set(compaction, { originalIfNeeded, originalNow });
+  } catch (error) {
+    if (originalIfNeeded !== undefined) compaction.compactIfNeeded = originalIfNeeded;
+    if (originalNow !== undefined) compaction.compactNow = originalNow;
+    log("could not wrap compaction lifecycle:", error instanceof Error ? error.message : String(error));
+    return undefined;
+  }
+  return () => {
+    const current = wrappedCompaction.get(compaction);
+    if (current === undefined) return;
+    if (wrapperIfNeeded !== undefined && compaction.compactIfNeeded === wrapperIfNeeded) compaction.compactIfNeeded = current.originalIfNeeded;
+    if (wrapperNow !== undefined && compaction.compactNow === wrapperNow) compaction.compactNow = current.originalNow;
+    wrappedCompaction.delete(compaction);
+  };
+}
+
+function agentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): CompactionLike | undefined {
   const get = agent.ctx?.get;
   if (typeof get !== "function") return undefined;
   const compaction = get.call(agent.ctx, "compaction");
   if (!isRecord(compaction)) return undefined;
   const service = compaction as CompactionLike;
-  wrapIsolatePressure(service);
+  if (ctx !== undefined) {
+    const dispose = wrapCompactionMethods(ctx, service);
+    if (dispose !== undefined) ctx.effect(() => dispose, "dsh-fixes: compaction lifecycle");
+  }
   return service;
 }
 
@@ -374,7 +464,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   const agent = payload.agent as CompactAgent | undefined;
   if (!isRecord(agent)) return;
 
-  const compaction = agentCompaction(agent);
+  const compaction = agentCompaction(ctx, agent);
   if (compaction?.compactIfNeeded === undefined) {
     if (!runAutoCompact.missingLogged) {
       runAutoCompact.missingLogged = true;
@@ -444,6 +534,65 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
 
 runAutoCompact.missingLogged = false;
 
+function installRequestErrorRetry(ctx: PluginContext): void {
+  const gate = createCompactionRetryGate();
+  ctx.effect(() => {
+    const requestDisposer = ctx.on(
+      "agent/request-error",
+      async (...args: unknown[]) => {
+        const payload = args[0];
+        const next = args[1];
+        const delegate = () => (typeof next === "function" ? (next as () => Promise<unknown>)() : undefined);
+        if (!isRecord(payload) || !isRecord(payload.agent) || typeof payload.turn !== "number") return delegate();
+        const agent = payload.agent as CompactAgent;
+        const signal = abortSignalOf(payload.signal);
+        const progress = latestCompactionProgress.get(agent);
+        latestCompactionProgress.delete(agent);
+        const shouldRetry = shouldRetryRequestAfterCompaction({
+          failure: payload.failure,
+          outputStarted: sessionAttemptHasVisibleOutput(agent.session),
+          alreadyRetried: !gate.canRetry(agent, payload.turn),
+          noProgress: progress?.noProgress,
+          signalAborted: signal?.aborted === true,
+        });
+        if (!shouldRetry) return delegate();
+
+        const compaction = agentCompaction(ctx, agent);
+        if (compaction?.compactIfNeeded === undefined) return delegate();
+        gate.markRetried(agent, payload.turn);
+        try {
+          await compaction.compactIfNeeded(agent, autoCompactTrigger(), signal ?? new AbortController().signal);
+        } catch (error) {
+          const failedProgress = latestCompactionProgress.get(agent);
+          if (signal?.aborted !== true && failedProgress?.committed === true && failedProgress.noProgress === false) {
+            return { kind: "retry" };
+          }
+          log("request-overflow compaction failed:", error instanceof Error ? error.message : String(error));
+          return delegate();
+        }
+        const completedProgress = latestCompactionProgress.get(agent);
+        if (signal?.aborted === true || completedProgress?.committed !== true || completedProgress.noProgress === true) {
+          return delegate();
+        }
+        return { kind: "retry" };
+      },
+      { global: true },
+    );
+    const statusDisposer = ctx.on(
+      "agent/status",
+      (...args: unknown[]) => {
+        const payload = args[0];
+        if (isRecord(payload) && payload.status === "idle" && isRecord(payload.agent)) gate.reset(payload.agent);
+      },
+      { global: true },
+    );
+    return () => {
+      if (typeof requestDisposer === "function") requestDisposer();
+      if (typeof statusDisposer === "function") statusDisposer();
+    };
+  }, "dsh-fixes: request overflow recovery");
+}
+
 function installAutoCompact(ctx: PluginContext): void {
   ctx.effect(() => {
     const disposer = ctx.on(
@@ -468,8 +617,9 @@ function installAutoCompact(ctx: PluginContext): void {
 export async function compactCurrentSession(
   agent: CompactAgent,
   signal?: AbortSignal,
+  ctx?: PluginContext,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const compaction = agentCompaction(agent);
+  const compaction = agentCompaction(ctx, agent);
   if (compaction?.compactNow === undefined) {
     return { ok: false, error: "compaction unavailable on this agent" };
   }
@@ -507,7 +657,7 @@ function installContextCommand(ctx: PluginContext): void {
       description: "Compact the current session context",
       recordInput: false,
       handler: async (invocation) => {
-        const result = await compactCurrentSession(invocation.agent, invocation.signal);
+        const result = await compactCurrentSession(invocation.agent, invocation.signal, ctx);
         if (result.ok) return { kind: "success" };
         return { kind: "error", text: result.error };
       },
@@ -524,6 +674,7 @@ export function apply(ctx: PluginContext): void {
   installSettingsWatcher(ctx);
   installDuckDuckGoSearch(ctx);
   installCompactionRetry(ctx);
+  installRequestErrorRetry(ctx);
   installAutoCompact(ctx);
   installContextCommand(ctx);
 }

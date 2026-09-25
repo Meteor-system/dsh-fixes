@@ -60,6 +60,29 @@ describe("compactPreviewNodesFromSession", () => {
     });
     expect(nodes.map((item) => item.type)).toEqual(["system/message", "user/message", "assistant/message"]);
   });
+
+  it("cuts stale surface nodes at the active boundary while preserving the system head", () => {
+    const events = [
+      { type: "system/message", data: { text: "system" } },
+      { type: "user/message", data: { text: "covered before boundary" } },
+      {
+        type: "user/message",
+        data: {
+          message: {
+            source: { kind: "plugin", plugin: "compact_boundary", boundaryId: "boundary-1" },
+          },
+        },
+      },
+      { type: "user/message", data: { text: "new question" } },
+      { type: "assistant/message", data: { text: "new answer" } },
+    ];
+    const nodes = compactPreviewNodesFromSession({
+      surface: { nodes: [0, 1, 2, 3, 4] },
+      eventAt: (seq: number) => events[seq],
+    });
+    expect(nodes.map((item) => item.seq)).toEqual([0, 2, 3, 4]);
+    expect(previewCompactDrop(nodes).dropped.map((item) => item.seq)).toEqual([2, 3]);
+  });
 });
 
 describe("sessionIdOf", () => {

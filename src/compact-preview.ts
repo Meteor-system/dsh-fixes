@@ -1,3 +1,5 @@
+import { surfaceCutBeforeBoundary } from "./compaction-boundary.js";
+
 export type CompactPreviewNode = {
   seq: number;
   type: string;
@@ -62,13 +64,14 @@ function roleToType(role: string): string {
   return role;
 }
 
-function nodesFromMessages(messages: unknown): CompactPreviewNode[] {
+function nodesFromMessages(messages: unknown, cut: number): CompactPreviewNode[] {
   if (!Array.isArray(messages)) return [];
   const result: CompactPreviewNode[] = [];
   for (const [index, message] of messages.entries()) {
     if (!isRecord(message)) continue;
     const role = typeof message.role === "string" ? message.role : "user";
     const type = role.includes("/") ? role : roleToType(role);
+    if (index !== 0 && index < cut) continue;
     result.push({
       seq: typeof message.seq === "number" ? message.seq : index,
       type,
@@ -86,10 +89,17 @@ export function compactPreviewNodesFromSession(session: unknown): CompactPreview
   const eventAt = typeof session.eventAt === "function" ? session.eventAt : undefined;
   if (nodes !== undefined && eventAt !== undefined) {
     const result: CompactPreviewNode[] = [];
-    for (const seqValue of nodes) {
+    const cut = surfaceCutBeforeBoundary(session);
+    for (const [index, seqValue] of nodes.entries()) {
       if (typeof seqValue !== "number") continue;
-      const event = eventAt.call(session, seqValue);
+      let event: unknown;
+      try {
+        event = eventAt.call(session, seqValue);
+      } catch {
+        event = undefined;
+      }
       const type = isRecord(event) && typeof event.type === "string" ? event.type : "unknown";
+      if (index !== 0 && index < cut) continue;
       result.push({
         seq: seqValue,
         type,
@@ -99,7 +109,7 @@ export function compactPreviewNodesFromSession(session: unknown): CompactPreview
     }
     return result;
   }
-  return nodesFromMessages(session.messages);
+  return nodesFromMessages(session.messages, surfaceCutBeforeBoundary(session));
 }
 
 export function sessionIdOf(value: unknown): string | undefined {

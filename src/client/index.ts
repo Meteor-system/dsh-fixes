@@ -29,7 +29,10 @@ import {
 } from "../fixes-settings.js";
 
 export const name = "dsh-fixes";
-export const inject = ["slots", "settingsScope"];
+// slots is required. settingsScope existed through dsh 0.1.5; 0.1.7 replaced
+// it with configForms. Hard-injecting the old name leaves this entry pending
+// forever on 0.1.7 ("waiting for service: settingsScope"). Bind it optionally.
+export const inject = ["slots"];
 
 const FIXES_NS = "dsh-fixes";
 const PI_AI_NS = "llm-pi-ai";
@@ -53,6 +56,16 @@ type SettingsScope<T> = {
 
 type SettingsScopeBinder = {
   bind<T>(spec: { namespace: string; decode?: (section: unknown) => T | undefined }): SettingsScope<T>;
+};
+
+type ConfigFormLike<T> = {
+  getSnapshot(): { value?: T };
+  subscribe(listener: () => void): () => void;
+  set(field: string, value: unknown): Promise<unknown>;
+};
+
+type ConfigFormsLike = {
+  get<T>(entryId: string): ConfigFormLike<T>;
 };
 
 type SlotProps = {
@@ -83,6 +96,8 @@ type ClientContext = {
     ): unknown;
   };
   settingsScope?: SettingsScopeBinder;
+  configForms?: ConfigFormsLike;
+  inject?(services: string[], callback: (scoped: ClientContext) => void): unknown;
   commands?: { run?: (...args: unknown[]) => unknown };
   "commands/run"?: (...args: unknown[]) => unknown;
   get?(name: string): unknown;
@@ -99,16 +114,54 @@ function modelKey(provider: string, model: string): string {
 }
 
 function settingsBinder(ctx: ClientContext): SettingsScopeBinder | undefined {
-  if (ctx.settingsScope !== undefined && typeof ctx.settingsScope.bind === "function") {
-    return ctx.settingsScope;
-  }
-  if (typeof ctx.get === "function") {
-    const value = ctx.get("settingsScope");
-    if (isRecord(value) && typeof value.bind === "function") {
-      return value as SettingsScopeBinder;
-    }
-  }
+  if (typeof ctx.get !== "function") return undefined;
+  const value = ctx.get("settingsScope");
+  if (isRecord(value) && typeof value.bind === "function") return value as SettingsScopeBinder;
   return undefined;
+}
+
+function configFormsOf(ctx: ClientContext): ConfigFormsLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  const value = ctx.get("configForms");
+  if (isRecord(value) && typeof value.get === "function") return value as ConfigFormsLike;
+  return undefined;
+}
+
+function formAsScope<T>(form: ConfigFormLike<T>, decode?: (section: unknown) => T | undefined): SettingsScope<T> {
+  return {
+    getSnapshot() {
+      const snapshot = form.getSnapshot();
+      const raw = snapshot.value;
+      return { value: decode ? decode(raw) : raw };
+    },
+    subscribe(listener) {
+      return form.subscribe(listener);
+    },
+    async set(field, value) {
+      await form.set(field, value);
+    },
+  };
+}
+
+function resolveScopes(ctx: ClientContext): {
+  fixesScope: SettingsScope<FixesSettings> | undefined;
+  piAiScope: SettingsScope<unknown> | undefined;
+  defaultModelScope: SettingsScope<unknown> | undefined;
+} {
+  const forms = configFormsOf(ctx);
+  if (forms) {
+    return {
+      fixesScope: formAsScope(forms.get(FIXES_NS), parseFixesSettings),
+      piAiScope: formAsScope(forms.get(PI_AI_NS)),
+      defaultModelScope: formAsScope(forms.get("agent-default-model")),
+    };
+  }
+  const binder = settingsBinder(ctx);
+  return {
+    fixesScope: binder?.bind({ namespace: FIXES_NS, decode: parseFixesSettings }),
+    piAiScope: binder?.bind({ namespace: PI_AI_NS }),
+    defaultModelScope: binder?.bind({ namespace: "agent-default-model" }),
+  };
 }
 
 function catalogFromPiAi(raw: unknown): CatalogModel[] {
@@ -379,10 +432,26 @@ function checkboxRow(
 }
 
 export function apply(ctx: ClientContext): void {
-  const binder = settingsBinder(ctx);
-  const fixesScope = binder?.bind({ namespace: FIXES_NS, decode: parseFixesSettings });
-  const piAiScope = binder?.bind({ namespace: PI_AI_NS });
-  const defaultModelScope = binder?.bind({ namespace: "agent-default-model" });
+  const mount = (scoped: ClientContext) => {
+    try {
+      applyMounted(scoped);
+    } catch (error) {
+      console.warn("[dsh-fixes] client mount failed", error);
+    }
+  };
+  if (typeof ctx.inject === "function") {
+    ctx.inject(["configForms"], mount);
+    ctx.inject(["settingsScope"], (scoped) => {
+      if (configFormsOf(scoped)) return;
+      mount(scoped);
+    });
+    return;
+  }
+  mount(ctx);
+}
+
+function applyMounted(ctx: ClientContext): void {
+  const { fixesScope, piAiScope, defaultModelScope } = resolveScopes(ctx);
 
   function ContextPanel(props: SlotProps) {
     const selection = typeof props.useProjection === "function"

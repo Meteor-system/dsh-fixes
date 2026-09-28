@@ -52,4 +52,25 @@ describe("fillImageInput", () => {
     });
     expect(patched).toBe(0);
   });
+
+  it("reads via describe when get is missing (dsh 0.1.7)", async () => {
+    const section = {
+      providers: {
+        routincodex: {
+          defaultInput: ["text"],
+          models: [{ id: "grok-4.6", input: [] }],
+        },
+      },
+    };
+    const writes: unknown[] = [];
+    const patched = await fillImageInput({
+      writable: true,
+      describe: () => [{ ns: "llm-pi-ai", value: section }],
+      update: async (_namespace, value) => {
+        writes.push(value);
+      },
+    });
+    expect(patched).toBe(3);
+    expect(writes).toHaveLength(1);
+  });
 });

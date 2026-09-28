@@ -32,6 +32,7 @@ import {
   resolveEffectiveWindow,
   type FixesSettings,
 } from "./fixes-settings.js";
+import { Config } from "./fixes-config.js";
 import { patchProviders } from "./image-input.js";
 
 const SETTINGS_NAMESPACE = "llm-pi-ai";
@@ -39,6 +40,9 @@ const LOG_PREFIX = "[dsh-fixes]";
 
 export const name = "dsh-fixes";
 export const inject = ["settings", "timer"];
+export { Config };
+
+let activeConfig: unknown;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -48,18 +52,71 @@ function log(...args: unknown[]): void {
   console.log(LOG_PREFIX, ...args);
 }
 
+type SettingsDescriptorRow = { ns?: string; value?: unknown };
+
 type SettingsLike = {
   writable?: boolean;
-  get(namespace: string): unknown;
+  get?(namespace: string): unknown;
+  describe?(options?: { redactSecrets?: boolean }): SettingsDescriptorRow[];
   update(namespace: string, value: unknown): Promise<unknown>;
   register?(namespace: string, schema: unknown, options?: unknown): unknown;
+  configure?(presentation: { auto?: boolean }, owner?: unknown): () => void;
 };
+
+function namespaceId(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readSection(settings: SettingsLike, namespace: string): unknown {
+  if (typeof settings.get === "function") {
+    try {
+      return settings.get(namespace);
+    } catch {
+      // 0.1.7 SettingsForms has no get(); fall through to describe().
+    }
+  }
+  if (typeof settings.describe !== "function") return undefined;
+  try {
+    const rows = settings.describe({ redactSecrets: false }) ?? [];
+    for (const row of rows) {
+      const id = namespaceId(row.ns);
+      if (id === namespace || id.endsWith(`:${namespace}`)) return row.value;
+    }
+  } catch (error) {
+    log("describe error:", error instanceof Error ? error.message : String(error));
+  }
+  return undefined;
+}
+
+function unwrapField(value: unknown): unknown {
+  if (isRecord(value) && typeof value.get === "function") {
+    try {
+      return (value.get as () => unknown)();
+    } catch {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+function liveFixes(config: unknown): FixesSettings | undefined {
+  if (!isRecord(config)) return undefined;
+  const keys = ["contextWindows", "summarization", "compactionReserves", "autoCompactEnabled", "sessionOverrides"];
+  if (!keys.some((key) => key in config)) return undefined;
+  return parseFixesSettings({
+    contextWindows: unwrapField(config.contextWindows),
+    summarization: unwrapField(config.summarization),
+    compactionReserves: unwrapField(config.compactionReserves),
+    autoCompactEnabled: unwrapField(config.autoCompactEnabled),
+    sessionOverrides: unwrapField(config.sessionOverrides),
+  });
+}
 
 export async function fillImageInput(settings: SettingsLike): Promise<number> {
   if (settings.writable !== true) return 0;
   let section: unknown;
   try {
-    section = settings.get(SETTINGS_NAMESPACE);
+    section = readSection(settings, SETTINGS_NAMESPACE);
   } catch (error) {
     log("read settings error:", error instanceof Error ? error.message : String(error));
     return 0;
@@ -74,13 +131,19 @@ export async function fillImageInput(settings: SettingsLike): Promise<number> {
   return patched;
 }
 
-export function readFixes(settings: SettingsLike): FixesSettings {
+export function readFixes(settings: SettingsLike, config?: unknown): FixesSettings {
+  const fromLive = liveFixes(config);
+  if (fromLive !== undefined) return fromLive;
   try {
-    return parseFixesSettings(settings.get(FIXES_NAMESPACE));
+    return parseFixesSettings(readSection(settings, FIXES_NAMESPACE));
   } catch (error) {
     log("read dsh-fixes error:", error instanceof Error ? error.message : String(error));
     return parseFixesSettings(undefined);
   }
+}
+
+function currentFixes(settings: SettingsLike): FixesSettings {
+  return readFixes(settings, activeConfig);
 }
 
 export async function writeFixes(settings: SettingsLike, next: FixesSettings): Promise<void> {
@@ -113,7 +176,7 @@ async function mirrorContextWindows(
   if (keys.length === 0) return;
   let section: unknown;
   try {
-    section = settings.get(SETTINGS_NAMESPACE);
+    section = readSection(settings, SETTINGS_NAMESPACE);
   } catch (error) {
     log("read llm-pi-ai error:", error instanceof Error ? error.message : String(error));
     return;
@@ -205,7 +268,7 @@ function installSettingsWatcher(ctx: PluginContext): void {
       if (!alive) return;
       try {
         const patched = await fillImageInput(settings);
-        await mirrorContextWindows(settings, readFixes(settings).contextWindows);
+        await mirrorContextWindows(settings, currentFixes(settings).contextWindows);
         if (patched > 0) return;
       } catch (error) {
         if (!alive) return;
@@ -216,29 +279,38 @@ function installSettingsWatcher(ctx: PluginContext): void {
       if (retries <= 5) schedule(2000);
     };
     schedule(500);
-    const listenerDisposer = ctx.on("settings/updated", (...args: unknown[]) => {
+    const onSettingsChange = (...args: unknown[]) => {
       if (!alive) return;
       const namespace = args[0];
-      if (namespace === SETTINGS_NAMESPACE) {
+      if (namespace === SETTINGS_NAMESPACE || namespace === undefined) {
         fillImageInput(settings)
-          .then(() => mirrorContextWindows(settings, readFixes(settings).contextWindows))
+          .then(() => mirrorContextWindows(settings, currentFixes(settings).contextWindows))
           .catch((error) => {
             if (alive) log("watch fill error:", error instanceof Error ? error.message : String(error));
           });
+        if (namespace === SETTINGS_NAMESPACE) return;
+      }
+      if (namespace !== FIXES_NAMESPACE && namespace !== undefined) return;
+      if (args.length >= 3) {
+        const next = parseFixesSettings(args[1]);
+        const prev = parseFixesSettings(args[2]);
+        const windows = changedWindows(prev.contextWindows, next.contextWindows);
+        mirrorContextWindows(settings, windows).catch((error) => {
+          if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
+        });
         return;
       }
-      if (namespace !== FIXES_NAMESPACE) return;
-      const next = parseFixesSettings(args[1]);
-      const prev = parseFixesSettings(args[2]);
-      const windows = changedWindows(prev.contextWindows, next.contextWindows);
-      mirrorContextWindows(settings, windows).catch((error) => {
+      mirrorContextWindows(settings, currentFixes(settings).contextWindows).catch((error) => {
         if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
       });
-    });
+    };
+    const listenerDisposer = ctx.on("settings/updated", onSettingsChange);
+    const documentDisposer = ctx.on("settings/document-updated", onSettingsChange);
     return () => {
       alive = false;
       for (const dispose of timerDisposers.splice(0)) dispose();
       if (typeof listenerDisposer === "function") listenerDisposer();
+      if (typeof documentDisposer === "function") documentDisposer();
     };
   }, "dsh-fixes: image-input settings watcher");
 }
@@ -266,7 +338,7 @@ function compactionLiveOptions(ctx: PluginContext, options: unknown): unknown {
   if (!isRecord(options)) return options;
   return applyCompactionRoute(
     options as CompactionStreamOptions,
-    readFixes(ctx.settings).summarization,
+    readFixes(ctx.settings, activeConfig).summarization,
   );
 }
 
@@ -648,7 +720,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
 
   const busy = agent.status !== undefined && agent.status !== "idle" && agent.status !== "running";
   const locked = sessionCompactionLocked(agent.session);
-  const fixes = readFixes(ctx.settings);
+  const fixes = currentFixes(ctx.settings);
   const sessionId = sessionIdOf(agent.session);
   const routeKey = modelKey(provider, model);
   const contextWindow = resolveEffectiveWindow(fixes, sessionId, routeKey) ?? catalogWindow;
@@ -814,8 +886,19 @@ function installContextCommand(ctx: PluginContext): void {
   }, "dsh-fixes: context-compact");
 }
 
-export function apply(ctx: PluginContext): void {
+export function apply(ctx: PluginContext, config?: unknown): void {
+  activeConfig = config;
   installFixesNamespace(ctx);
+  if (typeof ctx.settings.configure === "function") {
+    try {
+      ctx.effect(() => {
+        const dispose = ctx.settings.configure?.({ auto: false });
+        return typeof dispose === "function" ? dispose : () => undefined;
+      }, "dsh-fixes: custom page");
+    } catch (error) {
+      log("settings configure error:", error instanceof Error ? error.message : String(error));
+    }
+  }
   installSettingsWatcher(ctx);
   installDuckDuckGoSearch(ctx);
   installFileTouchLedger(ctx);

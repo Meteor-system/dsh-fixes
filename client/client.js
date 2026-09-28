@@ -434,7 +434,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/index.ts
 		const name = "dsh-fixes";
-		const inject = ["slots", "settingsScope"];
+		const inject = ["slots"];
 		const FIXES_NS = "dsh-fixes";
 		const PI_AI_NS = "llm-pi-ai";
 		const WINDOW_CHOICES = [
@@ -467,11 +467,45 @@ window.__ModuleLoader__.load({
 			return `${provider}/${model}`;
 		}
 		function settingsBinder(ctx) {
-			if (ctx.settingsScope !== void 0 && typeof ctx.settingsScope.bind === "function") return ctx.settingsScope;
-			if (typeof ctx.get === "function") {
-				const value = ctx.get("settingsScope");
-				if (isRecord(value) && typeof value.bind === "function") return value;
-			}
+			if (typeof ctx.get !== "function") return void 0;
+			const value = ctx.get("settingsScope");
+			if (isRecord(value) && typeof value.bind === "function") return value;
+		}
+		function configFormsOf(ctx) {
+			if (typeof ctx.get !== "function") return void 0;
+			const value = ctx.get("configForms");
+			if (isRecord(value) && typeof value.get === "function") return value;
+		}
+		function formAsScope(form, decode) {
+			return {
+				getSnapshot() {
+					const raw = form.getSnapshot().value;
+					return { value: decode ? decode(raw) : raw };
+				},
+				subscribe(listener) {
+					return form.subscribe(listener);
+				},
+				async set(field, value) {
+					await form.set(field, value);
+				}
+			};
+		}
+		function resolveScopes(ctx) {
+			const forms = configFormsOf(ctx);
+			if (forms) return {
+				fixesScope: formAsScope(forms.get(FIXES_NS), parseFixesSettings),
+				piAiScope: formAsScope(forms.get(PI_AI_NS)),
+				defaultModelScope: formAsScope(forms.get("agent-default-model"))
+			};
+			const binder = settingsBinder(ctx);
+			return {
+				fixesScope: binder?.bind({
+					namespace: FIXES_NS,
+					decode: parseFixesSettings
+				}),
+				piAiScope: binder?.bind({ namespace: PI_AI_NS }),
+				defaultModelScope: binder?.bind({ namespace: "agent-default-model" })
+			};
 		}
 		function catalogFromPiAi(raw) {
 			if (!isRecord(raw) || !isRecord(raw.providers)) return [];
@@ -668,13 +702,25 @@ window.__ModuleLoader__.load({
 			}), label);
 		}
 		function apply(ctx) {
-			const binder = settingsBinder(ctx);
-			const fixesScope = binder?.bind({
-				namespace: FIXES_NS,
-				decode: parseFixesSettings
-			});
-			const piAiScope = binder?.bind({ namespace: PI_AI_NS });
-			const defaultModelScope = binder?.bind({ namespace: "agent-default-model" });
+			const mount = (scoped) => {
+				try {
+					applyMounted(scoped);
+				} catch (error) {
+					console.warn("[dsh-fixes] client mount failed", error);
+				}
+			};
+			if (typeof ctx.inject === "function") {
+				ctx.inject(["configForms"], mount);
+				ctx.inject(["settingsScope"], (scoped) => {
+					if (configFormsOf(scoped)) return;
+					mount(scoped);
+				});
+				return;
+			}
+			mount(ctx);
+		}
+		function applyMounted(ctx) {
+			const { fixesScope, piAiScope, defaultModelScope } = resolveScopes(ctx);
 			function ContextPanel(props) {
 				const selection = typeof props.useProjection === "function" ? props.useProjection("modelSelection", (value) => value) : void 0;
 				const defaultModel = useScopeValue(defaultModelScope, void 0);

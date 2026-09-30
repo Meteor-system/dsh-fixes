@@ -46,6 +46,17 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/source-kind.ts
+		function isRecord$4(value) {
+			return typeof value === "object" && value !== null && !Array.isArray(value);
+		}
+		function sourcePluginName(source) {
+			if (!isRecord$4(source) || typeof source.kind !== "string") return void 0;
+			if (source.kind === "plugin" && typeof source.plugin === "string") return source.plugin;
+			if (source.kind === "compact-checkpoint") return "compact";
+			if (source.kind.startsWith("plugin:")) return source.kind.slice(7);
+		}
+		//#endregion
 		//#region src/compaction-boundary.ts
 		function isRecord$3(value) {
 			return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -66,9 +77,11 @@ window.__ModuleLoader__.load({
 			return value.formatVersion === void 0 || typeof value.formatVersion === "number" && Number.isSafeInteger(value.formatVersion) && value.formatVersion > 0;
 		}
 		function isCompactBoundarySource(value) {
-			if (!isRecord$3(value) || value.kind !== "plugin" || typeof value.plugin !== "string") return false;
-			if (value.plugin === "compact") return isNonEmptyString(value.compactionId);
-			if (value.plugin !== "compact_boundary") return false;
+			if (!isRecord$3(value)) return false;
+			const plugin = sourcePluginName(value);
+			if (plugin === void 0) return false;
+			if (plugin === "compact") return isNonEmptyString(value.compactionId);
+			if (plugin !== "compact_boundary") return false;
 			if (!optionalNonEmptyString(value, "boundaryId")) return false;
 			if (!optionalFormatVersion(value)) return false;
 			if (!optionalSequence(value, "coveredStartSeq") || !optionalSequence(value, "coveredEndSeq")) return false;
@@ -87,7 +100,7 @@ window.__ModuleLoader__.load({
 			if (isCompactBoundarySource(value.source)) return value.source;
 		}
 		function boundaryFromSource(seq, source) {
-			if (source.plugin === "compact") return {
+			if (sourcePluginName(source) === "compact") return {
 				seq,
 				legacy: true
 			};
@@ -206,9 +219,10 @@ window.__ModuleLoader__.load({
 		}
 		function eventTitle(type, event) {
 			const source = eventSource(event);
-			if (source?.kind === "plugin" && source.plugin === "compact_boundary") return "压缩边界";
-			if (source?.kind === "plugin" && source.plugin === "compact" && typeof source.compactionId === "string" && source.compactionId.length > 0) return "压缩边界";
-			if (source?.kind === "plugin" && source.plugin === "dsh-fixes" && source.form === "snapshot") return "上下文快照";
+			const plugin = sourcePluginName(source);
+			if (plugin === "compact_boundary") return "压缩边界";
+			if (plugin === "compact" && typeof source?.compactionId === "string" && source.compactionId.length > 0) return "压缩边界";
+			if (plugin === "dsh-fixes" && source?.form === "snapshot") return "上下文快照";
 			if (type === "system/message") return "系统";
 			if (type === "user/message") return "用户";
 			if (type === "assistant/message") return "助手";
@@ -298,8 +312,9 @@ window.__ModuleLoader__.load({
 			if (tokens >= 1e6) return `${Math.round(tokens / 1e5) / 10}M`;
 			return `${Math.round(tokens / 1e3)}k`;
 		}
-		function compactionThresholdLabel(budget) {
-			if (budget === void 0) return "无法计算自动压缩阈值";
+		function compactionThresholdLabel(budget, autoEnabled = true) {
+			if (budget === void 0) return autoEnabled ? "无法计算自动压缩阈值" : "无法计算压缩阈值（自动压缩已关闭）";
+			if (!autoEnabled) return `压缩阈值约 ${formatTokenCount(budget.thresholdTokens)}（自动压缩已关闭；预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
 			return `约 ${formatTokenCount(budget.thresholdTokens)} 时压缩（预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
 		}
 		function contextChipCopy(tokens) {
@@ -434,7 +449,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/index.ts
 		const name = "dsh-fixes";
-		const inject = ["slots"];
+		const inject = ["slots", "configForms"];
 		const FIXES_NS = "dsh-fixes";
 		const PI_AI_NS = "llm-pi-ai";
 		const WINDOW_CHOICES = [
@@ -477,10 +492,15 @@ window.__ModuleLoader__.load({
 			if (isRecord(value) && typeof value.get === "function") return value;
 		}
 		function formAsScope(form, decode) {
+			let previousRaw = Symbol("dsh-fixes: unset form snapshot");
+			let previousSnapshot;
 			return {
 				getSnapshot() {
 					const raw = form.getSnapshot().value;
-					return { value: decode ? decode(raw) : raw };
+					if (previousSnapshot !== void 0 && Object.is(raw, previousRaw)) return previousSnapshot;
+					previousRaw = raw;
+					previousSnapshot = { value: decode ? decode(raw) : raw };
+					return previousSnapshot;
 				},
 				subscribe(listener) {
 					return form.subscribe(listener);
@@ -702,22 +722,11 @@ window.__ModuleLoader__.load({
 			}), label);
 		}
 		function apply(ctx) {
-			const mount = (scoped) => {
-				try {
-					applyMounted(scoped);
-				} catch (error) {
-					console.warn("[dsh-fixes] client mount failed", error);
-				}
-			};
-			if (typeof ctx.inject === "function") {
-				ctx.inject(["configForms"], mount);
-				ctx.inject(["settingsScope"], (scoped) => {
-					if (configFormsOf(scoped)) return;
-					mount(scoped);
-				});
-				return;
+			try {
+				applyMounted(ctx);
+			} catch (error) {
+				console.warn("[dsh-fixes] client mount failed", error);
 			}
-			mount(ctx);
 		}
 		function applyMounted(ctx) {
 			const { fixesScope, piAiScope, defaultModelScope } = resolveScopes(ctx);
@@ -957,7 +966,7 @@ window.__ModuleLoader__.load({
 				}, entry.label)))))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("label", { style: labelStyle }, "自动压缩"), checkboxRow("启用自动压缩", autoEnabled, false, onAutoEnabled), checkboxRow("仅当前会话", sessionAutoOn, sessionId === void 0, onSessionAutoOnly), (0, react.createElement)("div", { style: {
 					fontSize: 12,
 					opacity: autoEnabled ? 1 : .5
-				} }, autoEnabled ? compactionThresholdLabel(budget) : "已关闭自动压缩")), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("button", {
+				} }, compactionThresholdLabel(budget, autoEnabled))), (0, react.createElement)("div", { style: rowStyle }, (0, react.createElement)("button", {
 					type: "button",
 					disabled: preview.count === 0,
 					title: previewLine,
@@ -1019,6 +1028,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		exports.apply = apply;
+		exports.formAsScope = formAsScope;
 		exports.inject = inject;
 		exports.name = name;
 		return module.exports;

@@ -29,12 +29,18 @@ function formatTokenCount(tokens: number): string {
   return `${Math.round(tokens / 1_000)}k`;
 }
 
-export function compactionThresholdLabel(budget: {
-  thresholdTokens: number;
-  summaryOutputTokens: number;
-  toolResultTokens: number;
-} | undefined): string {
-  if (budget === undefined) return "无法计算自动压缩阈值";
+export function compactionThresholdLabel(
+  budget: {
+    thresholdTokens: number;
+    summaryOutputTokens: number;
+    toolResultTokens: number;
+  } | undefined,
+  autoEnabled = true,
+): string {
+  if (budget === undefined) return autoEnabled ? "无法计算自动压缩阈值" : "无法计算压缩阈值（自动压缩已关闭）";
+  if (!autoEnabled) {
+    return `压缩阈值约 ${formatTokenCount(budget.thresholdTokens)}（自动压缩已关闭；预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
+  }
   return `约 ${formatTokenCount(budget.thresholdTokens)} 时压缩（预留摘要 ${formatTokenCount(budget.summaryOutputTokens)} + 工具结果 ${formatTokenCount(budget.toolResultTokens)}）`;
 }
 

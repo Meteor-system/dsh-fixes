@@ -1,4 +1,5 @@
 import { surfaceCutBeforeBoundary } from "./compaction-boundary.js";
+import { sourcePluginName } from "./source-kind.js";
 
 export type CompactPreviewNode = {
   seq: number;
@@ -67,11 +68,12 @@ function eventText(event: unknown): string {
 
 function eventTitle(type: string, event?: unknown): string {
   const source = eventSource(event);
-  if (source?.kind === "plugin" && source.plugin === "compact_boundary") return "压缩边界";
-  if (source?.kind === "plugin" && source.plugin === "compact" && typeof source.compactionId === "string" && source.compactionId.length > 0) {
+  const plugin = sourcePluginName(source);
+  if (plugin === "compact_boundary") return "压缩边界";
+  if (plugin === "compact" && typeof source?.compactionId === "string" && source.compactionId.length > 0) {
     return "压缩边界";
   }
-  if (source?.kind === "plugin" && source.plugin === "dsh-fixes" && source.form === "snapshot") return "上下文快照";
+  if (plugin === "dsh-fixes" && source?.form === "snapshot") return "上下文快照";
   if (type === "system/message") return "系统";
   if (type === "user/message") return "用户";
   if (type === "assistant/message") return "助手";

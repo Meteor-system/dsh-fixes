@@ -70,6 +70,7 @@ describe("renderRehydrationMessage", () => {
     };
     expect(result.role).toBe("user");
     expect(result.source.form).toBe("snapshot");
+    expect((result.source as { kind: string }).kind).toBe("plugin:dsh-fixes");
     expect(result.source.sections.map((section) => section.name)).toEqual([
       "file:src/index.ts",
       "todo:current todos",

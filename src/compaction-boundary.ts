@@ -1,3 +1,5 @@
+import { sourcePluginName } from "./source-kind.js";
+
 export type ActiveCompactionBoundary = {
   seq: number;
   boundaryId?: string;
@@ -40,13 +42,15 @@ function optionalFormatVersion(value: RecordValue): boolean {
 }
 
 export function isCompactBoundarySource(value: unknown): boolean {
-  if (!isRecord(value) || value.kind !== "plugin" || typeof value.plugin !== "string") return false;
+  if (!isRecord(value)) return false;
+  const plugin = sourcePluginName(value);
+  if (plugin === undefined) return false;
 
-  if (value.plugin === "compact") {
+  if (plugin === "compact") {
     return isNonEmptyString(value.compactionId);
   }
 
-  if (value.plugin !== "compact_boundary") return false;
+  if (plugin !== "compact_boundary") return false;
   if (!optionalNonEmptyString(value, "boundaryId")) return false;
   if (!optionalFormatVersion(value)) return false;
   if (!optionalSequence(value, "coveredStartSeq") || !optionalSequence(value, "coveredEndSeq")) return false;
@@ -69,7 +73,7 @@ function sourceFromValue(value: unknown): unknown {
 }
 
 function boundaryFromSource(seq: number, source: RecordValue): ActiveCompactionBoundary {
-  if (source.plugin === "compact") {
+  if (sourcePluginName(source) === "compact") {
     return { seq, legacy: true };
   }
 

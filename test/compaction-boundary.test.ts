@@ -31,6 +31,8 @@ describe("isCompactBoundarySource", () => {
       }),
     ).toBe(true);
     expect(isCompactBoundarySource({ kind: "plugin", plugin: "compact_boundary" })).toBe(true);
+    expect(isCompactBoundarySource({ kind: "compact-checkpoint", compactionId: "compact-1" })).toBe(true);
+    expect(isCompactBoundarySource({ kind: "plugin:compact_boundary" })).toBe(true);
   });
 
   it("rejects unrelated and malformed sources", () => {

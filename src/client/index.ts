@@ -29,10 +29,10 @@ import {
 } from "../fixes-settings.js";
 
 export const name = "dsh-fixes";
-// slots is required. settingsScope existed through dsh 0.1.5; 0.1.7 replaced
-// it with configForms. Hard-injecting the old name leaves this entry pending
-// forever on 0.1.7 ("waiting for service: settingsScope"). Bind it optionally.
-export const inject = ["slots"];
+// Dynamic Client packages must declare every service they read. DSH 0.1.7
+// provides configuration through configForms; reading it through ctx.get is
+// rejected unless it is present in this declaration.
+export const inject = ["slots", "configForms"];
 
 const FIXES_NS = "dsh-fixes";
 const PI_AI_NS = "llm-pi-ai";
@@ -127,12 +127,17 @@ function configFormsOf(ctx: ClientContext): ConfigFormsLike | undefined {
   return undefined;
 }
 
-function formAsScope<T>(form: ConfigFormLike<T>, decode?: (section: unknown) => T | undefined): SettingsScope<T> {
+export function formAsScope<T>(form: ConfigFormLike<T>, decode?: (section: unknown) => T | undefined): SettingsScope<T> {
+  const unset = Symbol("dsh-fixes: unset form snapshot");
+  let previousRaw: unknown = unset;
+  let previousSnapshot: { value?: T } | undefined;
   return {
     getSnapshot() {
-      const snapshot = form.getSnapshot();
-      const raw = snapshot.value;
-      return { value: decode ? decode(raw) : raw };
+      const raw = form.getSnapshot().value;
+      if (previousSnapshot !== undefined && Object.is(raw, previousRaw)) return previousSnapshot;
+      previousRaw = raw;
+      previousSnapshot = { value: decode ? decode(raw) : raw };
+      return previousSnapshot;
     },
     subscribe(listener) {
       return form.subscribe(listener);
@@ -432,22 +437,11 @@ function checkboxRow(
 }
 
 export function apply(ctx: ClientContext): void {
-  const mount = (scoped: ClientContext) => {
-    try {
-      applyMounted(scoped);
-    } catch (error) {
-      console.warn("[dsh-fixes] client mount failed", error);
-    }
-  };
-  if (typeof ctx.inject === "function") {
-    ctx.inject(["configForms"], mount);
-    ctx.inject(["settingsScope"], (scoped) => {
-      if (configFormsOf(scoped)) return;
-      mount(scoped);
-    });
-    return;
+  try {
+    applyMounted(ctx);
+  } catch (error) {
+    console.warn("[dsh-fixes] client mount failed", error);
   }
-  mount(ctx);
 }
 
 function applyMounted(ctx: ClientContext): void {
@@ -782,7 +776,7 @@ function applyMounted(ctx: ClientContext): void {
               createElement(
                 "div",
                 { style: { fontSize: 12, opacity: autoEnabled ? 1 : 0.5 } },
-                autoEnabled ? compactionThresholdLabel(budget) : "已关闭自动压缩",
+                compactionThresholdLabel(budget, autoEnabled),
               ),
             ),
             createElement(

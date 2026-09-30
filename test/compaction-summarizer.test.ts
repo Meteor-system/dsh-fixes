@@ -127,6 +127,51 @@ describe("retryCompactionStream", () => {
     expect(attempts[1]?.tools).toBe(tools);
   });
 
+  it("retries after a zero-output context overflow finish chunk", async () => {
+    const messages = [system, ...completeToolTurn(), finalInstruction];
+    const attempts: CompactionStreamOptions[] = [];
+    const original = (options: CompactionStreamOptions) => {
+      attempts.push(options);
+      if (attempts.length === 1) {
+        return stream([
+          { type: "finish", reason: { kind: "error", failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "context window exceeded" } } },
+        ])(options);
+      }
+      return stream([{ type: "finish", reason: { kind: "stop" } }])(options);
+    };
+
+    const output = await collect(retryCompactionStream(original, {
+      purpose: "compaction",
+      messages,
+    }));
+
+    expect(output).toEqual([{ type: "finish", reason: { kind: "stop" } }]);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.messages).toBe(messages);
+    expect(attempts[1]?.messages).toEqual([system, finalInstruction]);
+  });
+
+  it("does not retry a second time when the trimmed attempt throws", async () => {
+    const messages = [system, ...completeToolTurn(), finalInstruction];
+    const attempts: CompactionStreamOptions[] = [];
+    const original = (options: CompactionStreamOptions) => {
+      attempts.push(options);
+      if (attempts.length === 1) {
+        return stream([
+          { type: "finish", reason: { kind: "error", failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "context window exceeded" } } },
+        ])(options);
+      }
+      if (attempts.length === 2) return stream([], { code: "CONTEXT_WINDOW_EXCEEDED" })(options);
+      return stream([{ type: "finish", reason: { kind: "stop" } }])(options);
+    };
+
+    await expect(collect(retryCompactionStream(original, {
+      purpose: "compaction",
+      messages,
+    }))).rejects.toMatchObject({ code: "CONTEXT_WINDOW_EXCEEDED" });
+    expect(attempts).toHaveLength(2);
+  });
+
   it("does not retry after partial output", async () => {
     let calls = 0;
     const original = (options: CompactionStreamOptions) => {

@@ -1,4 +1,6 @@
+import { symbols } from "@deepseek-ai/cordis";
 import { applyModelWindow } from "./apply-window.js";
+import { createAgentServiceCache } from "./compaction-service-cache.js";
 import { resolveCompactionBudget } from "./compaction-budget.js";
 import { autoCompactTrigger, sessionCompactionLocked, shouldAutoCompact, shouldRunIsolateCompact } from "./compaction-policy.js";
 import { sessionIdOf } from "./compact-preview.js";
@@ -12,6 +14,7 @@ import {
   sessionAttemptHasVisibleOutput,
   shouldRetryRequestAfterCompaction,
 } from "./compaction-request-retry.js";
+import { createCompactionRehydrationGate } from "./compaction-rehydration-gate.js";
 import {
   MAX_REHYDRATION_FILES,
   MAX_REHYDRATION_TOKENS,
@@ -34,12 +37,16 @@ import {
 } from "./fixes-settings.js";
 import { Config } from "./fixes-config.js";
 import { patchProviders } from "./image-input.js";
+import {
+  normalizeUserMessageEvent,
+  userMessageAppendData,
+} from "./user-message-event.js";
 
 const SETTINGS_NAMESPACE = "llm-pi-ai";
 const LOG_PREFIX = "[dsh-fixes]";
 
 export const name = "dsh-fixes";
-export const inject = ["settings", "timer"];
+export const inject = ["settings", "timer", "agentPresets"];
 export { Config };
 
 let activeConfig: unknown;
@@ -405,14 +412,24 @@ type CompactionLike = {
   compactNow?(agent: unknown, signal: AbortSignal, sourceCommandId?: unknown): Promise<unknown>;
 };
 
+type TraceableCompaction = CompactionLike & { [symbols.original]?: unknown };
+
+function compactionTarget(compaction: CompactionLike): CompactionLike {
+  const original = (compaction as TraceableCompaction)[symbols.original];
+  return original !== null && (typeof original === "object" || typeof original === "function")
+    ? original as CompactionLike
+    : compaction;
+}
+
 const wrappedCompaction = new WeakMap<object, {
-  originalIfNeeded?: (agent: unknown, trigger: string, signal: AbortSignal) => Promise<unknown>;
-  originalNow?: (agent: unknown, signal: AbortSignal, sourceCommandId?: unknown) => Promise<unknown>;
+  originalIfNeeded?: CompactionLike["compactIfNeeded"];
+  originalNow?: CompactionLike["compactNow"];
 }>();
 const latestCompactionProgress = new WeakMap<object, {
   committed: boolean;
   noProgress: boolean;
 }>();
+const rehydrationGate = createCompactionRehydrationGate();
 const fileTouchesByAgent = new WeakMap<object, FileTouch[]>();
 let nextFileTouchOrder = 0;
 
@@ -485,23 +502,41 @@ function recordCompactionProgress(
   return progress;
 }
 
+function compactionResultKey(result: unknown): string | undefined {
+  if (!isRecord(result)) return undefined;
+  if (typeof result.compactionId === "string" && result.compactionId.length > 0) {
+    return `id:${result.compactionId}`;
+  }
+  if (typeof result.summarySeq === "number" && Number.isSafeInteger(result.summarySeq)) {
+    return `summary:${result.summarySeq}`;
+  }
+  return undefined;
+}
+
 async function postCompaction(
   ctx: PluginContext,
   agent: CompactAgent,
   progress: { committed: boolean; noProgress: boolean },
+  result: unknown,
 ): Promise<void> {
   if (!progress.committed) return;
+  const key = compactionResultKey(result);
+  if (key !== undefined && !rehydrationGate.claim(agent as object, key)) return;
   try {
     await rehydrateAfterCompaction(ctx, agent);
   } catch (error) {
+    if (key !== undefined) rehydrationGate.release(agent as object, key);
     log("post-compaction rehydration failed:", error instanceof Error ? error.message : String(error));
   }
 }
 
 function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): (() => void) | undefined {
-  if (wrappedCompaction.has(compaction)) return undefined;
-  const originalIfNeeded = compaction.compactIfNeeded?.bind(compaction);
-  const originalNow = compaction.compactNow?.bind(compaction);
+  const target = compactionTarget(compaction);
+  if (wrappedCompaction.has(target as object)) return undefined;
+  const originalIfNeededValue = target.compactIfNeeded;
+  const originalNowValue = target.compactNow;
+  const originalIfNeeded = originalIfNeededValue?.bind(compaction);
+  const originalNow = originalNowValue?.bind(compaction);
   let wrapperIfNeeded: CompactionLike["compactIfNeeded"];
   let wrapperNow: CompactionLike["compactNow"];
   try {
@@ -512,11 +547,11 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
         try {
           const result = await originalIfNeeded(agent, trigger, signal);
           const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, result);
-          await postCompaction(ctx, agent as CompactAgent, progress);
+          await postCompaction(ctx, agent as CompactAgent, progress, result);
           return result;
         } catch (error) {
           const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, {});
-          await postCompaction(ctx, agent as CompactAgent, progress);
+          await postCompaction(ctx, agent as CompactAgent, progress, {});
           throw error;
         }
       };
@@ -528,43 +563,82 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
         try {
           const result = await originalNow(agent, signal, sourceCommandId);
           const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, result);
-          await postCompaction(ctx, agent as CompactAgent, progress);
+          await postCompaction(ctx, agent as CompactAgent, progress, result);
           return result;
         } catch (error) {
           const progress = recordCompactionProgress(ctx, agent as CompactAgent, before, {});
-          await postCompaction(ctx, agent as CompactAgent, progress);
+          await postCompaction(ctx, agent as CompactAgent, progress, {});
           throw error;
         }
       };
       compaction.compactNow = wrapperNow;
     }
-    wrappedCompaction.set(compaction, { originalIfNeeded, originalNow });
+    wrappedCompaction.set(target as object, {
+      originalIfNeeded: originalIfNeededValue,
+      originalNow: originalNowValue,
+    });
   } catch (error) {
-    if (originalIfNeeded !== undefined) compaction.compactIfNeeded = originalIfNeeded;
-    if (originalNow !== undefined) compaction.compactNow = originalNow;
+    if (originalIfNeededValue !== undefined) target.compactIfNeeded = originalIfNeededValue;
+    if (originalNowValue !== undefined) target.compactNow = originalNowValue;
     log("could not wrap compaction lifecycle:", error instanceof Error ? error.message : String(error));
     return undefined;
   }
   return () => {
-    const current = wrappedCompaction.get(compaction);
+    const current = wrappedCompaction.get(target as object);
     if (current === undefined) return;
-    if (wrapperIfNeeded !== undefined && compaction.compactIfNeeded === wrapperIfNeeded) compaction.compactIfNeeded = current.originalIfNeeded;
-    if (wrapperNow !== undefined && compaction.compactNow === wrapperNow) compaction.compactNow = current.originalNow;
-    wrappedCompaction.delete(compaction);
+    if (wrapperIfNeeded !== undefined && target.compactIfNeeded === wrapperIfNeeded) target.compactIfNeeded = current.originalIfNeeded;
+    if (wrapperNow !== undefined && target.compactNow === wrapperNow) target.compactNow = current.originalNow;
+    wrappedCompaction.delete(target as object);
   };
 }
 
-function agentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): CompactionLike | undefined {
-  const get = agent.ctx?.get;
-  if (typeof get !== "function") return undefined;
-  const compaction = get.call(agent.ctx, "compaction");
+type CompactionServiceCache = (agent: CompactAgent) => CompactionLike | undefined;
+
+const compactionServiceCaches = new WeakMap<object, CompactionServiceCache>();
+
+function resolveAgentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): CompactionLike | undefined {
+  // Presets isolate compaction behind a per-agent realm in DSH 0.1.7. The
+  // preset registry is the supported bridge from a global plugin to that
+  // agent-owned service; direct context lookup remains a compatibility path
+  // for older runtimes and unisolated deployments.
+  let compaction: unknown;
+  const presets = typeof ctx?.get === "function" ? ctx.get("agentPresets") : undefined;
+  if (isRecord(presets) && typeof presets.serviceFor === "function") {
+    try {
+      compaction = presets.serviceFor(agent, "compaction");
+    } catch {
+      compaction = undefined;
+    }
+  }
+  if (!isRecord(compaction) && typeof ctx?.get === "function") {
+    compaction = ctx.get("compaction");
+  }
+  if (!isRecord(compaction)) {
+    const get = agent.ctx?.get;
+    compaction = typeof get === "function" ? get.call(agent.ctx, "compaction") : undefined;
+  }
   if (!isRecord(compaction)) return undefined;
-  const service = compaction as CompactionLike;
+  return compaction as CompactionLike;
+}
+
+function agentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): CompactionLike | undefined {
+  let compaction: CompactionLike | undefined;
+  if (ctx === undefined) {
+    compaction = resolveAgentCompaction(ctx, agent);
+  } else {
+    let cache = compactionServiceCaches.get(ctx as object);
+    if (cache === undefined) {
+      cache = createAgentServiceCache<CompactAgent, CompactionLike>((owner) => resolveAgentCompaction(ctx, owner));
+      compactionServiceCaches.set(ctx as object, cache);
+    }
+    compaction = cache(agent);
+  }
+  if (compaction === undefined) return undefined;
   if (ctx !== undefined) {
-    const dispose = wrapCompactionMethods(ctx, service);
+    const dispose = wrapCompactionMethods(ctx, compaction);
     if (dispose !== undefined) ctx.effect(() => dispose, "dsh-fixes: compaction lifecycle");
   }
-  return service;
+  return compaction;
 }
 
 type FsLike = {
@@ -584,6 +658,7 @@ type SessionStoreLike = {
 async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent): Promise<void> {
   const session = agent.session;
   if (!isRecord(session) || typeof session.append !== "function") return;
+  installUserMessageShapeGuard(session);
   const touches = fileTouchesByAgent.get(agent as object) ?? [];
   const items: RehydrationItem[] = [];
   const fs = ctx.get("fs") as FsLike | undefined;
@@ -634,9 +709,11 @@ async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent)
   }
   if (!isRecord(message)) return;
   const seq = typeof session.seq === "number" ? session.seq : Date.now();
-  const userMessage = { ...message, id: `dsh-fixes-rehydration-${seq}` };
+  const userMessage = userMessageAppendData({ ...message, id: `dsh-fixes-rehydration-${seq}` });
   try {
-    session.append("user/message", { message: userMessage }, { surfaceOp: "append" });
+    // user/message data is the message itself — nested `{ message }` leaves
+    // event.data.source undefined and core throws reading `kind`.
+    session.append("user/message", userMessage, { surfaceOp: "append" });
   } catch (error) {
     log("could not append rehydration snapshot:", error instanceof Error ? error.message : String(error));
     return;
@@ -886,8 +963,62 @@ function installContextCommand(ctx: PluginContext): void {
   }, "dsh-fixes: context-compact");
 }
 
+function installUserMessageShapeGuard(session: unknown): void {
+  if (!isRecord(session) || session.__dshFixesUserMessageGuard === true) return;
+  try {
+    if (typeof session.snapshotEvents === "function") {
+      const original = (session.snapshotEvents as (...args: unknown[]) => unknown).bind(session);
+      session.snapshotEvents = (...args: unknown[]) => {
+        const events = original(...args);
+        return Array.isArray(events) ? events.map((event) => normalizeUserMessageEvent(event)) : events;
+      };
+    }
+    if (typeof session.eventAt === "function") {
+      const original = (session.eventAt as (...args: unknown[]) => unknown).bind(session);
+      session.eventAt = (...args: unknown[]) => normalizeUserMessageEvent(original(...args));
+    }
+    session.__dshFixesUserMessageGuard = true;
+  } catch {
+    // Frozen session objects still go through the corrected append path.
+  }
+}
+
+function installUserMessageShapeGuards(ctx: PluginContext): void {
+  ctx.effect(() => {
+    const sessions = ctx.get("sessions") as { get?(id: unknown): unknown } | undefined;
+    if (sessions !== undefined && typeof sessions.get === "function") {
+      const original = sessions.get.bind(sessions);
+      sessions.get = (id: unknown) => {
+        const session = original(id);
+        installUserMessageShapeGuard(session);
+        return session;
+      };
+    }
+    const agents = ctx.get("agents") as { get?(id: unknown): unknown } | undefined;
+    if (agents !== undefined && typeof agents.get === "function") {
+      const original = agents.get.bind(agents);
+      agents.get = (id: unknown) => {
+        const agent = original(id);
+        if (isRecord(agent)) installUserMessageShapeGuard(agent.session);
+        return agent;
+      };
+    }
+    const disposer = ctx.on(
+      "session/event",
+      (...args: unknown[]) => {
+        installUserMessageShapeGuard(args[0]);
+      },
+      { global: true },
+    );
+    return () => {
+      if (typeof disposer === "function") disposer();
+    };
+  }, "dsh-fixes: user-message shape guard");
+}
+
 export function apply(ctx: PluginContext, config?: unknown): void {
   activeConfig = config;
+  installUserMessageShapeGuards(ctx);
   installFixesNamespace(ctx);
   if (typeof ctx.settings.configure === "function") {
     try {

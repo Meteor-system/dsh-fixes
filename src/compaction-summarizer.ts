@@ -162,21 +162,42 @@ export function trimOldestCompleteTurns(messages: readonly unknown[]): unknown[]
   return messages.slice();
 }
 
+function finishFailure(value: unknown): unknown {
+  if (!isRecord(value) || value.type !== "finish" || !isRecord(value.reason) || value.reason.kind !== "error") return undefined;
+  return value.reason.failure;
+}
+
 export async function* retryCompactionStream(
   original: (options: CompactionStreamOptions) => AsyncIterable<unknown>,
   options: CompactionStreamOptions,
 ): AsyncIterable<unknown> {
   let visibleOutput = false;
+  let retryStarted = false;
+  const retryOptions = (): CompactionStreamOptions | undefined => {
+    if (options.purpose !== "compaction" || visibleOutput || !Array.isArray(options.messages)) return undefined;
+    const trimmed = trimOldestCompleteTurns(options.messages);
+    return trimmed.length < options.messages.length ? { ...options, messages: trimmed } : undefined;
+  };
   try {
     for await (const chunk of original(options)) {
+      const failure = finishFailure(chunk);
+      if (failure !== undefined && isPromptTooLongFailure(failure)) {
+        const retry = retryOptions();
+        if (retry !== undefined) {
+          retryStarted = true;
+          for await (const retried of original(retry)) yield retried;
+          return;
+        }
+      }
       visibleOutput ||= hasVisibleStreamOutput(chunk);
       yield chunk;
     }
     return;
   } catch (error) {
-    if (options.purpose !== "compaction" || visibleOutput || !isPromptTooLongFailure(error) || !Array.isArray(options.messages)) throw error;
-    const trimmed = trimOldestCompleteTurns(options.messages);
-    if (trimmed.length >= options.messages.length) throw error;
-    for await (const chunk of original({ ...options, messages: trimmed })) yield chunk;
+    if (retryStarted || !isPromptTooLongFailure(error)) throw error;
+    const retry = retryOptions();
+    if (retry === undefined) throw error;
+    retryStarted = true;
+    for await (const chunk of original(retry)) yield chunk;
   }
 }

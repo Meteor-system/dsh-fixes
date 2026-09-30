@@ -116,8 +116,7 @@ export function renderRehydrationMessage(items: readonly RehydrationItem[], toke
     role: "user",
     content: [{ type: "text", text }],
     source: {
-      kind: "plugin",
-      plugin: "dsh-fixes",
+      kind: "plugin:dsh-fixes",
       form: "snapshot",
       sections: selected,
     },

@@ -19,6 +19,14 @@ describe("compactionThresholdLabel", () => {
   it("explains when the current model window is unavailable", () => {
     expect(compactionThresholdLabel(undefined)).toBe("无法计算自动压缩阈值");
   });
+
+  it("keeps the threshold visible when automatic compaction is disabled", () => {
+    expect(compactionThresholdLabel({
+      thresholdTokens: 239_000,
+      summaryOutputTokens: 20_000,
+      toolResultTokens: 13_000,
+    }, false)).toBe("压缩阈值约 239k（自动压缩已关闭；预留摘要 20k + 工具结果 13k）");
+  });
 });
 
 describe("windowSurchargeNote", () => {

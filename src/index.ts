@@ -535,8 +535,11 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
   if (wrappedCompaction.has(target as object)) return undefined;
   const originalIfNeededValue = target.compactIfNeeded;
   const originalNowValue = target.compactNow;
-  const originalIfNeeded = originalIfNeededValue?.bind(compaction);
-  const originalNow = originalNowValue?.bind(compaction);
+  // Read through Cordis so its method proxy keeps the engine's injected
+  // dependencies together with the caller's context. Raw methods bound to the
+  // service proxy lose that shadow context and fail on this.ctx.tokenMeter.
+  const originalIfNeeded = compaction.compactIfNeeded?.bind(compaction);
+  const originalNow = compaction.compactNow?.bind(compaction);
   let wrapperIfNeeded: CompactionLike["compactIfNeeded"];
   let wrapperNow: CompactionLike["compactNow"];
   try {

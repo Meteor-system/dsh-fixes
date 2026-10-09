@@ -272,7 +272,7 @@ function installFixesNamespace(ctx: PluginContext): void {
   }
 }
 
-function installSettingsWatcher(ctx: PluginContext): void {
+export function installSettingsWatcher(ctx: PluginContext): void {
   const settings = ctx.settings;
   ctx.effect(() => {
     let alive = true;
@@ -340,11 +340,23 @@ function installSettingsWatcher(ctx: PluginContext): void {
     };
     const listenerDisposer = ctx.on("settings/updated", onSettingsChange);
     const documentDisposer = ctx.on("settings/document-updated", onSettingsChange);
+    // Chat-side toggles write volatile config, which emits loader/volatile-update rather than
+    // settings/document-updated; without this listener a ticked switch only applies after a restart.
+    const volatileDisposer = ctx.on("loader/volatile-update", () => {
+      if (!alive) return;
+      const current = currentFixes(settings);
+      fillImageInput(settings, current.imageInputModels)
+        .then(() => mirrorContextWindows(settings, current.contextWindows))
+        .catch((error) => {
+          if (alive) log("volatile fill error:", error instanceof Error ? error.message : String(error));
+        });
+    });
     return () => {
       alive = false;
       for (const dispose of timerDisposers.splice(0)) dispose();
       if (typeof listenerDisposer === "function") listenerDisposer();
       if (typeof documentDisposer === "function") documentDisposer();
+      if (typeof volatileDisposer === "function") volatileDisposer();
     };
   }, "dsh-fixes: image-input settings watcher");
 }

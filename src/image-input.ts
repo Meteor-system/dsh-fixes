@@ -133,12 +133,15 @@ export function patchProviders(
       }
     }
 
-    // A model recorded as on but not named anywhere needs its own override, since the provider default is text-only.
+    // llm-pi-ai serves only the models a non-empty `models` list spells out, and it rejects modelOverrides
+    // beside that list. A rejected write fails every patch in the same settings update, so a stale or
+    // unlisted switch on such a route is skipped instead of written.
+    const servesOwnList = Array.isArray(profile.models) && profile.models.length > 0;
     const prefix = `${route}/`;
     for (const [key, on] of Object.entries(allow)) {
       if (on !== true || !key.startsWith(prefix)) continue;
       const modelId = key.slice(prefix.length);
-      if (modelId.length === 0 || named.has(modelId)) continue;
+      if (modelId.length === 0 || named.has(modelId) || servesOwnList) continue;
       nextOverrides[modelId] = { input: [TEXT, IMAGE] };
       patched += 1;
       overridesDirty = true;

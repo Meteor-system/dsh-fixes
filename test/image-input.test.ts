@@ -131,4 +131,18 @@ describe("patchProviders: image input is off unless recorded as on", () => {
     expect(second.patched).toBe(0);
     expect(second.providers).toBe(first.providers);
   });
+
+  it("does not write modelOverrides beside a non-empty models list", () => {
+    const source = {
+      routin: {
+        defaultInput: ["text"],
+        models: [{ id: "gpt-5.4", input: ["text"] }],
+      },
+    };
+
+    const { providers, patched } = patchProviders(source, { "routin/gpt-x": true });
+    expect(patched).toBe(0);
+    expect(providers).toBe(source);
+    expect(providers.routin).not.toHaveProperty("modelOverrides");
+  });
 });

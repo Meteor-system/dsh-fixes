@@ -124,4 +124,40 @@ describe("fillImageInput", () => {
     const written = writes[0] as { providers: { routin: { models: Array<{ input: string[] }> } } };
     expect(written.providers.routin.models[0]?.input).toEqual(["text"]);
   });
+
+  it("one stale switch on a models-list route does not block other routes' image patches", async () => {
+    const section = {
+      providers: {
+        routincodex: {
+          defaultInput: ["text"],
+          models: [{ id: "grok-4.6", input: ["text"] }],
+        },
+        routin: {
+          defaultInput: ["text"],
+          models: [{ id: "gpt-5.4", input: [] }],
+        },
+      },
+    };
+    const writes: unknown[] = [];
+    await fillImageInput(
+      {
+        writable: true,
+        get: () => section,
+        update: async (_namespace, value) => {
+          writes.push(value);
+        },
+      },
+      { "routincodex/removed-model": true, "routin/gpt-5.4": true },
+    );
+
+    expect(writes).toHaveLength(1);
+    const written = writes[0] as {
+      providers: {
+        routincodex: Record<string, unknown>;
+        routin: { models: Array<{ input: string[] }> };
+      };
+    };
+    expect(written.providers.routincodex).not.toHaveProperty("modelOverrides");
+    expect(written.providers.routin.models[0]?.input).toEqual(["text", "image"]);
+  });
 });

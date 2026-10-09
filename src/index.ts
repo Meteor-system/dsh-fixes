@@ -192,17 +192,6 @@ function splitModelKey(key: string): { provider: string; model: string } | undef
   return { provider: key.slice(0, index), model: key.slice(index + 1) };
 }
 
-function changedWindows(
-  prev: FixesSettings["contextWindows"],
-  next: FixesSettings["contextWindows"],
-): FixesSettings["contextWindows"] {
-  const changed: FixesSettings["contextWindows"] = {};
-  for (const [key, tokens] of Object.entries(next)) {
-    if (prev[key] !== tokens) changed[key] = tokens;
-  }
-  return changed;
-}
-
 async function mirrorContextWindows(
   settings: SettingsLike,
   windows: FixesSettings["contextWindows"],
@@ -305,54 +294,53 @@ export function installSettingsWatcher(ctx: PluginContext): void {
       if (retries <= 5) schedule(2000);
     };
     schedule(500);
+    // Config writes made while a Loader commit is running (HMR executing store) are rejected as nested.
+    // The watcher listeners fire inside that commit, so they only queue a fill; the loop below was
+    // started at install time and its awaits resume in that outer context, outside the commit.
+    let wake: (() => void) | undefined;
+    let queued = false;
+    let queuedFixes: FixesSettings | undefined;
+    const requestFill = (fixes?: FixesSettings) => {
+      if (!alive) return;
+      queued = true;
+      if (fixes !== undefined) queuedFixes = fixes;
+      const resume = wake;
+      wake = undefined;
+      resume?.();
+    };
+    const fillLoop = async () => {
+      while (alive) {
+        if (!queued) await new Promise<void>((resolve) => { wake = resolve; });
+        if (!alive) return;
+        queued = false;
+        const fixes = queuedFixes ?? currentFixes(settings);
+        queuedFixes = undefined;
+        try {
+          await fillImageInput(settings, fixes.imageInputModels);
+          await mirrorContextWindows(settings, fixes.contextWindows);
+        } catch (error) {
+          if (alive) log("image switch error:", error instanceof Error ? error.message : String(error));
+        }
+      }
+    };
+    void fillLoop();
     const onSettingsChange = (...args: unknown[]) => {
       if (!alive) return;
       const namespace = args[0];
-      if (namespace === SETTINGS_NAMESPACE || namespace === undefined) {
-        fillImageInput(settings, currentFixes(settings).imageInputModels)
-          .then(() => mirrorContextWindows(settings, currentFixes(settings).contextWindows))
-          .catch((error) => {
-            if (alive) log("watch fill error:", error instanceof Error ? error.message : String(error));
-          });
-        if (namespace === SETTINGS_NAMESPACE) return;
-      }
-      if (namespace !== FIXES_NAMESPACE && namespace !== undefined) return;
-      if (args.length >= 3) {
-        const next = parseFixesSettings(args[1]);
-        const prev = parseFixesSettings(args[2]);
-        const windows = changedWindows(prev.contextWindows, next.contextWindows);
-        // A switch change must reach llm-pi-ai too, or the toggle would only exist in dsh-fixes.
-        fillImageInput(settings, next.imageInputModels).catch((error) => {
-          if (alive) log("image switch error:", error instanceof Error ? error.message : String(error));
-        });
-        mirrorContextWindows(settings, windows).catch((error) => {
-          if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
-        });
-        return;
-      }
-      const current = currentFixes(settings);
-      fillImageInput(settings, current.imageInputModels).catch((error) => {
-        if (alive) log("image switch error:", error instanceof Error ? error.message : String(error));
-      });
-      mirrorContextWindows(settings, current.contextWindows).catch((error) => {
-        if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
-      });
+      if (namespace !== SETTINGS_NAMESPACE && namespace !== FIXES_NAMESPACE && namespace !== undefined) return;
+      const carriesFixes = namespace !== SETTINGS_NAMESPACE && args.length >= 3;
+      requestFill(carriesFixes ? parseFixesSettings(args[1]) : undefined);
     };
     const listenerDisposer = ctx.on("settings/updated", onSettingsChange);
     const documentDisposer = ctx.on("settings/document-updated", onSettingsChange);
     // Chat-side toggles write volatile config, which emits loader/volatile-update rather than
     // settings/document-updated; without this listener a ticked switch only applies after a restart.
-    const volatileDisposer = ctx.on("loader/volatile-update", () => {
-      if (!alive) return;
-      const current = currentFixes(settings);
-      fillImageInput(settings, current.imageInputModels)
-        .then(() => mirrorContextWindows(settings, current.contextWindows))
-        .catch((error) => {
-          if (alive) log("volatile fill error:", error instanceof Error ? error.message : String(error));
-        });
-    });
+    const volatileDisposer = ctx.on("loader/volatile-update", () => requestFill());
     return () => {
       alive = false;
+      const resume = wake;
+      wake = undefined;
+      resume?.();
       for (const dispose of timerDisposers.splice(0)) dispose();
       if (typeof listenerDisposer === "function") listenerDisposer();
       if (typeof documentDisposer === "function") documentDisposer();

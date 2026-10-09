@@ -16,17 +16,28 @@ import {
 } from "./compaction-request-retry.js";
 import { createCompactionRehydrationGate } from "./compaction-rehydration-gate.js";
 import {
-  MAX_REHYDRATION_FILES,
+  fileTouchesFromEvents,
+  sessionEventList,
+  skillItemsFromEvents,
+} from "./compaction-history.js";
+import {
   MAX_REHYDRATION_TOKENS,
   renderRehydrationMessage,
   selectRecentFileTouches,
-  skillBodiesFromSession,
   todoItemsFromProjection,
-  type FileTouch,
   type RehydrationItem,
 } from "./compaction-rehydration.js";
 import { patchContextWindows } from "./context-window.js";
-import { DUCKDUCKGO_PROVIDER_ID, searchFreeWeb } from "./duckduckgo.js";
+import { patchGet, patchMethod } from "./method-patch.js";
+import { probeHostSurface, type ServiceSpec } from "./host-probe.js";
+import { createLogSink, formatDiag, formatLogArgs, resolveLogFile } from "./log.js";
+
+const HOST_SURFACE: readonly ServiceSpec[] = [
+  { name: "llm", members: ["stream"] },
+  { name: "tokenMeter", members: ["measure"] },
+  { name: "sessions", members: ["get"] },
+  { name: "agents", members: ["get"] },
+];
 import {
   FIXES_NAMESPACE,
   modelKey,
@@ -36,7 +47,7 @@ import {
   type FixesSettings,
 } from "./fixes-settings.js";
 import { Config } from "./fixes-config.js";
-import { patchProviders } from "./image-input.js";
+import { patchProviders, type ImageAllowance } from "./image-input.js";
 import {
   normalizeUserMessageEvent,
   userMessageAppendData,
@@ -55,8 +66,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Console output reaches only the terminal running `dsh web`. The same lines also go to
+// <profile>/logs/dsh-fixes.log when the profile directory is known, so diagnostics survive a closed terminal.
+const logSink = createLogSink({
+  file: resolveLogFile(process.env),
+  onFailure: (message) => console.warn(LOG_PREFIX, "log file disabled:", message),
+});
+
+function logLine(message: string): void {
+  logSink.write(`${new Date().toISOString()} ${message}`);
+}
+
 function log(...args: unknown[]): void {
-  console.log(LOG_PREFIX, ...args);
+  console.warn(LOG_PREFIX, ...args);
+  logLine(`${LOG_PREFIX} ${formatLogArgs(args)}`);
+}
+
+function diag(stage: string, detail: Record<string, unknown> = {}): void {
+  console.warn(`${LOG_PREFIX} [diag] ${stage}`, JSON.stringify(detail));
+  logLine(`${LOG_PREFIX} ${formatDiag(stage, detail)}`);
 }
 
 type SettingsDescriptorRow = { ns?: string; value?: unknown };
@@ -108,7 +136,7 @@ function unwrapField(value: unknown): unknown {
 
 function liveFixes(config: unknown): FixesSettings | undefined {
   if (!isRecord(config)) return undefined;
-  const keys = ["contextWindows", "summarization", "compactionReserves", "autoCompactEnabled", "sessionOverrides"];
+  const keys = ["contextWindows", "summarization", "compactionReserves", "autoCompactEnabled", "sessionOverrides", "imageInputModels"];
   if (!keys.some((key) => key in config)) return undefined;
   return parseFixesSettings({
     contextWindows: unwrapField(config.contextWindows),
@@ -116,10 +144,11 @@ function liveFixes(config: unknown): FixesSettings | undefined {
     compactionReserves: unwrapField(config.compactionReserves),
     autoCompactEnabled: unwrapField(config.autoCompactEnabled),
     sessionOverrides: unwrapField(config.sessionOverrides),
+    imageInputModels: unwrapField(config.imageInputModels),
   });
 }
 
-export async function fillImageInput(settings: SettingsLike): Promise<number> {
+export async function fillImageInput(settings: SettingsLike, allow: ImageAllowance = {}): Promise<number> {
   if (settings.writable !== true) return 0;
   let section: unknown;
   try {
@@ -129,7 +158,7 @@ export async function fillImageInput(settings: SettingsLike): Promise<number> {
     return 0;
   }
   if (!isRecord(section)) return 0;
-  const image = patchProviders(section.providers);
+  const image = patchProviders(section.providers, allow);
   const windows = patchContextWindows(image.providers);
   const patched = image.patched + windows.patched;
   if (patched === 0) return 0;
@@ -205,17 +234,6 @@ async function mirrorContextWindows(
   log("mirrored", keys.length, "context window(s) into llm-pi-ai");
 }
 
-type WebLike = {
-  registerSearchProvider(provider: {
-    id: string;
-    available(): boolean;
-    search(
-      request: { query: string; maxResults?: number },
-      signal?: AbortSignal,
-    ): Promise<{ sources: Array<{ url: string; title?: string; snippet?: string }>; truncated: boolean }>;
-  }): () => void;
-};
-
 type PluginContext = {
   settings: SettingsLike;
   timeout: (callback: () => void, delay: number) => unknown;
@@ -240,6 +258,7 @@ fixesSchema.toJSON = () => ({
     compactionReserves: { type: "object" },
     autoCompactEnabled: { type: "boolean" },
     sessionOverrides: { type: "object" },
+    imageInputModels: { type: "object" },
   },
 });
 
@@ -274,7 +293,7 @@ function installSettingsWatcher(ctx: PluginContext): void {
     const tryOnce = async () => {
       if (!alive) return;
       try {
-        const patched = await fillImageInput(settings);
+        const patched = await fillImageInput(settings, currentFixes(settings).imageInputModels);
         await mirrorContextWindows(settings, currentFixes(settings).contextWindows);
         if (patched > 0) return;
       } catch (error) {
@@ -290,7 +309,7 @@ function installSettingsWatcher(ctx: PluginContext): void {
       if (!alive) return;
       const namespace = args[0];
       if (namespace === SETTINGS_NAMESPACE || namespace === undefined) {
-        fillImageInput(settings)
+        fillImageInput(settings, currentFixes(settings).imageInputModels)
           .then(() => mirrorContextWindows(settings, currentFixes(settings).contextWindows))
           .catch((error) => {
             if (alive) log("watch fill error:", error instanceof Error ? error.message : String(error));
@@ -302,12 +321,20 @@ function installSettingsWatcher(ctx: PluginContext): void {
         const next = parseFixesSettings(args[1]);
         const prev = parseFixesSettings(args[2]);
         const windows = changedWindows(prev.contextWindows, next.contextWindows);
+        // A switch change must reach llm-pi-ai too, or the toggle would only exist in dsh-fixes.
+        fillImageInput(settings, next.imageInputModels).catch((error) => {
+          if (alive) log("image switch error:", error instanceof Error ? error.message : String(error));
+        });
         mirrorContextWindows(settings, windows).catch((error) => {
           if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
         });
         return;
       }
-      mirrorContextWindows(settings, currentFixes(settings).contextWindows).catch((error) => {
+      const current = currentFixes(settings);
+      fillImageInput(settings, current.imageInputModels).catch((error) => {
+        if (alive) log("image switch error:", error instanceof Error ? error.message : String(error));
+      });
+      mirrorContextWindows(settings, current.contextWindows).catch((error) => {
         if (alive) log("window mirror error:", error instanceof Error ? error.message : String(error));
       });
     };
@@ -320,25 +347,6 @@ function installSettingsWatcher(ctx: PluginContext): void {
       if (typeof documentDisposer === "function") documentDisposer();
     };
   }, "dsh-fixes: image-input settings watcher");
-}
-
-function installDuckDuckGoSearch(ctx: PluginContext): void {
-  const web = ctx.get("web") as WebLike | undefined;
-  if (web === undefined) {
-    log("web service unavailable; duckduckgo search not registered");
-    return;
-  }
-  ctx.effect(() => {
-    const dispose = web.registerSearchProvider({
-      id: DUCKDUCKGO_PROVIDER_ID,
-      available: () => true,
-      search: (request, signal) => searchFreeWeb(request, { fetch: globalThis.fetch, signal }),
-    });
-    log("registered duckduckgo web search");
-    return () => {
-      dispose();
-    };
-  }, "dsh-fixes: duckduckgo search");
 }
 
 function compactionLiveOptions(ctx: PluginContext, options: unknown): unknown {
@@ -380,8 +388,7 @@ function installCompactionRetry(ctx: PluginContext): void {
   }
   const runtime = llm;
   ctx.effect(() => {
-    const original = runtime.stream.bind(runtime);
-    runtime.stream = (options: unknown) => {
+    const restore = patchMethod(runtime, "stream", (original: (options: unknown) => unknown, options: unknown) => {
       const routed = compactionLiveOptions(ctx, options);
       if (!isRecord(routed) || routed.purpose !== "compaction") return original(routed);
       return retryCompactionStream(
@@ -392,11 +399,9 @@ function installCompactionRetry(ctx: PluginContext): void {
         },
         routed as CompactionStreamOptions,
       );
-    };
+    });
     log("wrapping llm.stream for safe compaction retry");
-    return () => {
-      runtime.stream = original;
-    };
+    return restore;
   }, "dsh-fixes: compaction retry");
 }
 
@@ -430,42 +435,11 @@ const latestCompactionProgress = new WeakMap<object, {
   noProgress: boolean;
 }>();
 const rehydrationGate = createCompactionRehydrationGate();
-const fileTouchesByAgent = new WeakMap<object, FileTouch[]>();
-let nextFileTouchOrder = 0;
 
 type CompactionProgressSnapshot = {
   generation?: number;
   tokens?: number;
 };
-
-function executionAborted(value: unknown): boolean {
-  return (typeof AbortSignal !== "undefined" && value instanceof AbortSignal && value.aborted)
-    || isRecord(value) && value.aborted === true;
-}
-
-function recordFileTouch(exec: unknown, result: unknown): void {
-  if (!isRecord(exec) || !isRecord(result) || result.isError !== false || executionAborted(exec.signal)) return;
-  if (exec.name !== "read" && exec.name !== "write" && exec.name !== "edit") return;
-  if (!isRecord(exec.arguments) || typeof exec.arguments.file_path !== "string" || exec.arguments.file_path.length === 0) return;
-  const rootAgent = isRecord(exec.rootAgent) ? exec.rootAgent : isRecord(exec.agent) ? exec.agent : undefined;
-  if (rootAgent === undefined) return;
-  const touches = fileTouchesByAgent.get(rootAgent) ?? [];
-  touches.push({ path: exec.arguments.file_path, order: ++nextFileTouchOrder });
-  fileTouchesByAgent.set(rootAgent, touches);
-}
-
-function installFileTouchLedger(ctx: PluginContext): void {
-  ctx.effect(() => {
-    const disposer = ctx.on(
-      "tools/result",
-      (...args: unknown[]) => recordFileTouch(args[0], args[1]),
-      { global: true },
-    );
-    return () => {
-      if (typeof disposer === "function") disposer();
-    };
-  }, "dsh-fixes: file touch ledger");
-}
 
 function compactionSnapshot(ctx: PluginContext, agent: CompactAgent): CompactionProgressSnapshot {
   const session = agent.session;
@@ -519,9 +493,18 @@ async function postCompaction(
   progress: { committed: boolean; noProgress: boolean },
   result: unknown,
 ): Promise<void> {
-  if (!progress.committed) return;
   const key = compactionResultKey(result);
-  if (key !== undefined && !rehydrationGate.claim(agent as object, key)) return;
+  diag("postCompaction", {
+    committed: progress.committed,
+    noProgress: progress.noProgress,
+    key: key ?? null,
+    resultKeys: isRecord(result) ? Object.keys(result) : typeof result,
+  });
+  if (!progress.committed) return;
+  if (key !== undefined && !rehydrationGate.claim(agent as object, key)) {
+    diag("postCompaction: rehydration already claimed for this compaction", { key });
+    return;
+  }
   try {
     await rehydrateAfterCompaction(ctx, agent);
   } catch (error) {
@@ -545,7 +528,9 @@ function wrapCompactionMethods(ctx: PluginContext, compaction: CompactionLike): 
   try {
     if (originalIfNeeded !== undefined) {
       wrapperIfNeeded = async (agent, trigger, signal) => {
-        if (!shouldRunIsolateCompact(trigger)) return null;
+        if (!shouldRunIsolateCompact(trigger)) {
+          return null;
+        }
         const before = compactionSnapshot(ctx, agent as CompactAgent);
         try {
           const result = await originalIfNeeded(agent, trigger, signal);
@@ -644,12 +629,6 @@ function agentCompaction(ctx: PluginContext | undefined, agent: CompactAgent): C
   return compaction;
 }
 
-type FsLike = {
-  resolve?(path: string, options?: { cwd?: string; signal?: AbortSignal }): Promise<{ displayPath?: string }>;
-  stat?(target: unknown, signal?: AbortSignal): Promise<{ type?: string; size?: number } | undefined>;
-  readText?(target: unknown, signal?: AbortSignal): Promise<string>;
-};
-
 type SessionProjectionLike = {
   stateOf?(session: unknown, key: string): unknown;
 };
@@ -660,38 +639,44 @@ type SessionStoreLike = {
 
 async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent): Promise<void> {
   const session = agent.session;
-  if (!isRecord(session) || typeof session.append !== "function") return;
+  if (!isRecord(session) || typeof session.append !== "function") {
+    diag("rehydrate: skipped, session has no append", { sessionType: typeof session });
+    return;
+  }
   installUserMessageShapeGuard(session);
-  const touches = fileTouchesByAgent.get(agent as object) ?? [];
+  const history = sessionEventList(session);
+  const touches = fileTouchesFromEvents(history);
+  diag("rehydrate: start", { events: history.length, touches: touches.length });
   const items: RehydrationItem[] = [];
-  const fs = ctx.get("fs") as FsLike | undefined;
   const header = isRecord(session.header) ? session.header : undefined;
-  if (fs?.resolve !== undefined && fs.stat !== undefined && fs.readText !== undefined) {
-    for (const path of selectRecentFileTouches(touches).slice(0, MAX_REHYDRATION_FILES)) {
-      try {
-        const target = await fs.resolve(path, { cwd: typeof header?.cwd === "string" ? header.cwd : undefined });
-        const info = await fs.stat(target);
-        if (info?.type !== "file" || info.size !== undefined && info.size > MAX_REHYDRATION_TOKENS * 4) continue;
-        const text = await fs.readText(target);
-        if (typeof text === "string" && text.length > 0) {
-          items.push({ kind: "file", name: target.displayPath ?? path, text });
-        }
-      } catch {
-        // One missing or unreadable file must not cancel the snapshot.
-      }
-    }
+  // Paths only: the model re-reads a file when it needs its current content,
+  // which keeps file bodies out of the snapshot and frees the budget for skills.
+  const paths = selectRecentFileTouches(touches, typeof header?.cwd === "string" ? header.cwd : undefined);
+  diag("rehydrate: recent files", { count: paths.length });
+  if (paths.length > 0) {
+    items.push({
+      kind: "file",
+      name: "recent files",
+      text: ["Recently touched files (paths only; read them again before relying on their content):", ...paths.map((path) => `- ${path}`)].join("\n"),
+    });
   }
 
   const projections = ctx.get("sessionProjections") as SessionProjectionLike | undefined;
+  diag("rehydrate: projections", { available: projections?.stateOf !== undefined });
   if (projections?.stateOf !== undefined) {
     try {
-      const todo = todoItemsFromProjection(projections.stateOf(session, "todos"));
+      const rawTodos = projections.stateOf(session, "todos");
+      const todo = todoItemsFromProjection(rawTodos);
       if (todo !== undefined) items.push(todo);
-    } catch {
+    } catch (error) {
       // Projection capability is optional and may disappear with its provider.
+      diag("rehydrate: todo projection failed", { error: error instanceof Error ? error.message : String(error) });
     }
   }
-  items.push(...skillBodiesFromSession(session));
+  const skills = skillItemsFromEvents(history);
+  diag("rehydrate: history", { events: history.length, touches: touches.length, skills: skills.map((item) => item.name) });
+  items.push(...skills);
+  diag("rehydrate: items", { count: items.length, kinds: items.map((item) => item.kind) });
 
   let message = renderRehydrationMessage(items, MAX_REHYDRATION_TOKENS);
   const meter = ctx.get("tokenMeter") as TokenMeterLike | undefined;
@@ -710,13 +695,19 @@ async function rehydrateAfterCompaction(ctx: PluginContext, agent: CompactAgent)
       message = renderRehydrationMessage(remaining, MAX_REHYDRATION_TOKENS);
     }
   }
-  if (!isRecord(message)) return;
+  if (!isRecord(message)) {
+    diag("rehydrate: no snapshot (empty after render)", { items: items.length });
+    return;
+  }
   const seq = typeof session.seq === "number" ? session.seq : Date.now();
   const userMessage = userMessageAppendData({ ...message, id: `dsh-fixes-rehydration-${seq}` });
   try {
     // user/message data is the message itself — nested `{ message }` leaves
     // event.data.source undefined and core throws reading `kind`.
     session.append("user/message", userMessage, { surfaceOp: "append" });
+    // Report what was written, not what was offered: the budget may drop items.
+    const written = isRecord(message.source) && Array.isArray(message.source.sections) ? message.source.sections.length : 0;
+    diag("rehydrate: appended snapshot", { seq, sections: written, offered: items.length });
   } catch (error) {
     log("could not append rehydration snapshot:", error instanceof Error ? error.message : String(error));
     return;
@@ -771,9 +762,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   }
 
   const meter = ctx.get("tokenMeter") as TokenMeterLike | undefined;
-  if (meter === undefined || typeof meter.measure !== "function" || agent.session === undefined) {
-    return;
-  }
+  if (meter === undefined || typeof meter.measure !== "function" || agent.session === undefined) return;
   let estimatedTokens: number;
   try {
     const measurement = meter.measure(agent.session);
@@ -786,9 +775,7 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
   const provider = agent.options?.provider;
   const model = agent.options?.model;
   const llm = ctx.get("llm") as LlmInfoLike | undefined;
-  if (provider === undefined || model === undefined || typeof llm?.resolveModelInfo !== "function") {
-    return;
-  }
+  if (provider === undefined || model === undefined || typeof llm?.resolveModelInfo !== "function") return;
   let catalogWindow: number | undefined;
   try {
     const info = await llm.resolveModelInfo(provider, model, signal);
@@ -808,18 +795,15 @@ async function runAutoCompact(ctx: PluginContext, payload: unknown): Promise<voi
     ? resolveCompactionBudget(contextWindow, fixes.compactionReserves[routeKey])
     : undefined;
   if (budget === undefined) return;
-  if (
-    !shouldAutoCompact({
-      estimatedTokens,
-      contextWindow: budget.contextWindow,
-      thresholdTokens: budget.thresholdTokens,
-      busy,
-      locked,
-      enabled: resolveEffectiveAutoCompact(fixes, sessionId),
-    })
-  ) {
-    return;
-  }
+  const compact = shouldAutoCompact({
+    estimatedTokens,
+    contextWindow: budget.contextWindow,
+    thresholdTokens: budget.thresholdTokens,
+    busy,
+    locked,
+    enabled: resolveEffectiveAutoCompact(fixes, sessionId),
+  });
+  if (!compact) return;
 
   try {
     await compaction.compactIfNeeded(agent, autoCompactTrigger(), signal ?? new AbortController().signal);
@@ -988,39 +972,59 @@ function installUserMessageShapeGuard(session: unknown): void {
 
 function installUserMessageShapeGuards(ctx: PluginContext): void {
   ctx.effect(() => {
+    // Set false on dispose so a call that slips past the restore cannot touch a dead context.
+    let active = true;
+    const restores: Array<() => void> = [];
     const sessions = ctx.get("sessions") as { get?(id: unknown): unknown } | undefined;
-    if (sessions !== undefined && typeof sessions.get === "function") {
-      const original = sessions.get.bind(sessions);
-      sessions.get = (id: unknown) => {
-        const session = original(id);
-        installUserMessageShapeGuard(session);
-        return session;
-      };
+    if (sessions !== undefined) {
+      restores.push(
+        patchGet(sessions, (original, id) => {
+          const session = original(id);
+          if (active) installUserMessageShapeGuard(session);
+          return session;
+        }),
+      );
     }
     const agents = ctx.get("agents") as { get?(id: unknown): unknown } | undefined;
-    if (agents !== undefined && typeof agents.get === "function") {
-      const original = agents.get.bind(agents);
-      agents.get = (id: unknown) => {
-        const agent = original(id);
-        if (isRecord(agent)) installUserMessageShapeGuard(agent.session);
-        return agent;
-      };
+    if (agents !== undefined) {
+      restores.push(
+        patchGet(agents, (original, id) => {
+          const agent = original(id);
+          if (active && isRecord(agent)) {
+            installUserMessageShapeGuard(agent.session);
+            // The Host resolves the agent before running a human command such as
+            // /compact. Installing here covers a first manual compaction after a
+            // restart, when no pre-step has run to install the wrapper yet.
+            try {
+              agentCompaction(ctx, agent as CompactAgent);
+            } catch (error) {
+              log("compaction lifecycle install failed:", error instanceof Error ? error.message : String(error));
+            }
+          }
+          return agent;
+        }),
+      );
     }
     const disposer = ctx.on(
       "session/event",
       (...args: unknown[]) => {
-        installUserMessageShapeGuard(args[0]);
+        if (active) installUserMessageShapeGuard(args[0]);
       },
       { global: true },
     );
     return () => {
+      active = false;
+      for (const restore of restores) restore();
       if (typeof disposer === "function") disposer();
     };
   }, "dsh-fixes: user-message shape guard");
 }
 
+
 export function apply(ctx: PluginContext, config?: unknown): void {
   activeConfig = config;
+  // One line per startup: which Host services the plugin can patch, and why any are missing.
+  diag("host surface", probeHostSurface((name) => ctx.get(name), HOST_SURFACE));
   installUserMessageShapeGuards(ctx);
   installFixesNamespace(ctx);
   if (typeof ctx.settings.configure === "function") {
@@ -1034,8 +1038,6 @@ export function apply(ctx: PluginContext, config?: unknown): void {
     }
   }
   installSettingsWatcher(ctx);
-  installDuckDuckGoSearch(ctx);
-  installFileTouchLedger(ctx);
   installCompactionRetry(ctx);
   installRequestErrorRetry(ctx);
   installAutoCompact(ctx);

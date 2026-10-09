@@ -1,5 +1,5 @@
-export const MAX_REHYDRATION_FILES = 5;
-export const MAX_REHYDRATION_TOKENS = 50_000;
+export const MAX_REHYDRATION_FILES = 20;
+export const MAX_REHYDRATION_TOKENS = 20_000;
 
 export type FileTouch = { path: string; order: number };
 export type RehydrationItem = {
@@ -18,51 +18,37 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-export function selectRecentFileTouches(touches: readonly FileTouch[]): string[] {
+// Dependency and out-of-workspace files are not the user's working context;
+// the model reads them only when a tool call names them again.
+export function isWorkspacePath(path: string, cwd: string | undefined): boolean {
+  const normalized = path.replace(/\\/gu, "/");
+  if (/(^|\/)node_modules\//u.test(normalized)) return false;
+  if (/(^|\/)\.\.(\/|$)/u.test(normalized)) return false;
+  const absolute = /^([a-zA-Z]:)?\//u.test(normalized);
+  if (!absolute) return true;
+  if (cwd === undefined || cwd.length === 0) return false;
+  const root = cwd.replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  return normalized.toLowerCase().startsWith(`${root}/`);
+}
+
+// The same file can be named with either separator or differing case; one entry per file.
+function identityKey(path: string): string {
+  return path.replace(/\\/gu, "/").toLowerCase();
+}
+
+export function selectRecentFileTouches(touches: readonly FileTouch[], cwd?: string): string[] {
   const newest = new Map<string, FileTouch>();
   for (const touch of touches) {
     if (!nonEmptyString(touch.path) || !Number.isFinite(touch.order)) continue;
-    const previous = newest.get(touch.path);
-    if (previous === undefined || touch.order >= previous.order) newest.set(touch.path, touch);
+    if (!isWorkspacePath(touch.path, cwd)) continue;
+    const key = identityKey(touch.path);
+    const previous = newest.get(key);
+    if (previous === undefined || touch.order >= previous.order) newest.set(key, touch);
   }
   return [...newest.values()]
     .sort((left, right) => right.order - left.order)
     .slice(0, MAX_REHYDRATION_FILES)
     .map((touch) => touch.path);
-}
-
-function messageText(message: RecordValue): string {
-  if (typeof message.content === "string") return message.content;
-  if (!Array.isArray(message.content)) return "";
-  return message.content
-    .filter(isRecord)
-    .map((block) => (typeof block.text === "string" ? block.text : ""))
-    .filter((text) => text.length > 0)
-    .join("\n");
-}
-
-export function skillBodiesFromSession(session: unknown): RehydrationItem[] {
-  if (!isRecord(session) || typeof session.deriveMessages !== "function") return [];
-  let messages: unknown;
-  try {
-    messages = session.deriveMessages();
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(messages)) return [];
-  const seen = new Set<string>();
-  const items: RehydrationItem[] = [];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!isRecord(message) || !isRecord(message.source) || message.source.kind !== "skill-invocation") continue;
-    const name = typeof message.source.name === "string" && message.source.name.length > 0 ? message.source.name : "skill";
-    if (seen.has(name)) continue;
-    const text = messageText(message);
-    if (text.length === 0) continue;
-    seen.add(name);
-    items.unshift({ kind: "skill", name, text });
-  }
-  return items;
 }
 
 export function todoItemsFromProjection(value: unknown): RehydrationItem | undefined {
@@ -111,6 +97,8 @@ export function renderRehydrationMessage(items: readonly RehydrationItem[], toke
     used += cost;
   }
   if (selected.length === 0) return undefined;
+  // Bodies live only in `content`; `source` keeps section names so the log
+  // stores each snapshot body once.
   const text = [header, ...selected.map((section) => `### ${section.name}\n${section.text}`)].join("\n\n");
   return {
     role: "user",
@@ -118,7 +106,7 @@ export function renderRehydrationMessage(items: readonly RehydrationItem[], toke
     source: {
       kind: "plugin:dsh-fixes",
       form: "snapshot",
-      sections: selected,
+      sections: selected.map((section) => section.name),
     },
   };
 }

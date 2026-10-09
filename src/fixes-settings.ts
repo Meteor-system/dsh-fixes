@@ -14,6 +14,8 @@ export type FixesSettings = {
   compactionReserves: Record<string, CompactionReserveOverride>;
   autoCompactEnabled: boolean;
   sessionOverrides: Record<string, SessionOverride>;
+  /** `route/model` → whether that model may receive image input. Absent means off. */
+  imageInputModels: Record<string, boolean>;
 };
 
 export function modelKey(provider: string, model: string): string {
@@ -72,6 +74,15 @@ function parseSessionOverride(value: unknown): SessionOverride | undefined {
   return override.window !== undefined || override.autoCompactEnabled !== undefined ? override : undefined;
 }
 
+function parseImageInputModels(value: unknown): Record<string, boolean> {
+  if (!isRecord(value)) return {};
+  const models: Record<string, boolean> = {};
+  for (const [key, flag] of Object.entries(value)) {
+    if (key.length > 0 && typeof flag === "boolean") models[key] = flag;
+  }
+  return models;
+}
+
 export function parseFixesSettings(raw: unknown): FixesSettings {
   if (!isRecord(raw)) {
     return {
@@ -80,6 +91,7 @@ export function parseFixesSettings(raw: unknown): FixesSettings {
       compactionReserves: {},
       autoCompactEnabled: true,
       sessionOverrides: {},
+      imageInputModels: {},
     };
   }
   const contextWindows: Record<string, WindowChoice> = {};
@@ -110,6 +122,7 @@ export function parseFixesSettings(raw: unknown): FixesSettings {
     compactionReserves: parseCompactionReserves(raw.compactionReserves),
     autoCompactEnabled: raw.autoCompactEnabled !== false,
     sessionOverrides,
+    imageInputModels: parseImageInputModels(raw.imageInputModels),
   };
 }
 

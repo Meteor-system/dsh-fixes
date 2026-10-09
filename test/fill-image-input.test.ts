@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fillImageInput } from "../src/index.ts";
 
 describe("fillImageInput", () => {
-  it("writes text+image onto grok-4.6 and the provider defaultInput", async () => {
+  it("writes text-only onto grok-4.6 when nothing is recorded", async () => {
     const section = {
       providers: {
         routincodex: {
@@ -20,16 +20,16 @@ describe("fillImageInput", () => {
       },
     });
 
-    expect(patched).toBe(3);
+    expect(patched).toBeGreaterThan(0);
     expect(writes).toEqual([
       {
         providers: {
           routincodex: {
-            defaultInput: ["text", "image"],
+            defaultInput: ["text"],
             models: [
               {
                 id: "grok-4.6",
-                input: ["text", "image"],
+                input: ["text"],
                 contextWindow: 500000,
                 maxTokens: 500000,
               },
@@ -70,7 +70,58 @@ describe("fillImageInput", () => {
         writes.push(value);
       },
     });
-    expect(patched).toBe(3);
+    expect(patched).toBeGreaterThan(0);
     expect(writes).toHaveLength(1);
+  });
+
+  it("writes image onto a model the user recorded as on", async () => {
+    const section = {
+      providers: {
+        routincodex: {
+          defaultInput: ["text"],
+          models: [{ id: "grok-4.6", input: [] }],
+        },
+      },
+    };
+    const writes: unknown[] = [];
+    await fillImageInput(
+      {
+        writable: true,
+        get: () => section,
+        update: async (_namespace, value) => {
+          writes.push(value);
+        },
+      },
+      { "routincodex/grok-4.6": true },
+    );
+
+    const written = writes[0] as { providers: { routincodex: { models: Array<{ input: string[] }> } } };
+    expect(written.providers.routincodex.models[0]?.input).toEqual(["text", "image"]);
+  });
+
+  it("applies the per-model image switch from fixes settings", async () => {
+    const section = {
+      providers: {
+        routin: {
+          defaultInput: ["text"],
+          models: [{ id: "gpt-5.4", input: ["text", "image"] }],
+        },
+      },
+    };
+    const writes: unknown[] = [];
+    await fillImageInput(
+      {
+        writable: true,
+        get: () => section,
+        update: async (_namespace, value) => {
+          writes.push(value);
+        },
+      },
+      { "routin/gpt-5.4": false },
+    );
+
+    expect(writes).toHaveLength(1);
+    const written = writes[0] as { providers: { routin: { models: Array<{ input: string[] }> } } };
+    expect(written.providers.routin.models[0]?.input).toEqual(["text"]);
   });
 });

@@ -16,4 +16,5 @@ export const Config = z.object({
   compactionReserves: maybeVolatile(z.any().default({})),
   autoCompactEnabled: maybeVolatile(z.boolean().default(true)),
   sessionOverrides: maybeVolatile(z.any().default({})),
+  imageInputModels: maybeVolatile(z.any().default({})),
 });

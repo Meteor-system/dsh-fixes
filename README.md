@@ -12,7 +12,6 @@ It writes host-process settings, so **every session** on that profile picks them
 | --- | --- |
 | Image input | Declares `text` + `image` on every third-party `llm-pi-ai` provider that left input empty or text-only |
 | Context windows | Fills official `contextWindow` / `maxTokens` for known models; other undeclared models get `500000`; explicit numbers are left alone |
-| Free search | Routes `web_search` through DuckDuckGo (Bing HTML fallback) so no DeepSeek key is required |
 | Context chip | Window, summarizer, reserve-based auto-compact, boundary preview, and one-click compact for the current session, next to the official model picker |
 
 Uninstalling the plugin does **not** roll back values already written into `llm-pi-ai`.
@@ -66,7 +65,11 @@ The plugin watches `llm-pi-ai` and, for every third-party provider, sets `defaul
 
 **Windows.** grok-4.6, for example, gets the official 500k. Models never touched in the Context panel keep their catalog number (Kimi 128k / 256k / 1M, and so on).
 
-**Search.** DuckDuckGo HTML results first; Bing web search if DDG is unreachable or challenged. There is no official search API. `web_fetch` still uses the existing `http` provider.
+**Search.** Free web search has moved to the separate [`dsh-web-search`](../dsh-web-search) bundle, with its own switch under General settings. Install both bundles to keep search working; this plugin no longer registers a search provider.
+
+## Candidate upstream
+
+The context chip, the compaction boundary, rehydration, and the compaction retry wrappers patch Harness internals (`llm.stream`, `sessions.get`, `agents.get`, and the compaction service). They are the strongest candidates to move into Harness core. Until then they stay here, and a Harness upgrade can break them.
 
 ## Settings
 

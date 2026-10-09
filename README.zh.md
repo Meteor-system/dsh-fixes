@@ -12,7 +12,6 @@ DeepSeek Harness 的 web profile 插件：补第三方网关缺的能力，并�
 | --- | --- |
 | 读图 | 第三方 `llm-pi-ai` 供应商没声明 image 时，补上 `text` + `image` |
 | 窗口数字 | 已知模型写入官方 `contextWindow` / `maxTokens`；其它未声明的补 `500000`，已有数字不改 |
-| 免费搜索 | `web_search` 走 DuckDuckGo（失败回落必应网页），不再需要 DeepSeek key |
 | 上下文芯片 | 在官方模型选择器左侧调节窗口、摘要模型、按预留计算自动压缩，并预览边界后一键压缩当前会话 |
 
 卸载插件**不会**回滚已经写入 `llm-pi-ai` 的配置。
@@ -66,7 +65,11 @@ cannot read "...png" as an image: model "grok-4.6" does not declare image input
 
 **窗口。** 例如 grok-4.6 补官方 50 万。从未在上下文面板改过的模型，仍保留原来的目录数字（如 Kimi 的 128k / 256k / 1M）。
 
-**搜索。** 先走 DuckDuckGo HTML 结果页；连不上或被 challenge 时回落必应网页搜索。没有官方搜索 API。`web_fetch` 仍走原来的 `http` 提供方。
+**搜索。** 免费网页搜索已迁到独立的 [`dsh-web-search`](../dsh-web-search) 插件，在「通用」设置里单独开关。两个插件都要装，搜索才可用；本插件不再注册搜索提供方。
+
+## 候选上游
+
+上下文芯片、压缩边界、快照重注入和压缩重试包装都在改宿主内部（`llm.stream`、`sessions.get`、`agents.get` 和压缩服务）。它们最适合移进 Harness 核心。在那之前留在这里，Harness 升级可能让它们失效。
 
 ## 设置
 

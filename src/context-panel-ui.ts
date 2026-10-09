@@ -1,11 +1,3 @@
-const WINDOW_LABELS: Record<number, string> = {
-  128000: "128k",
-  256000: "256k",
-  392000: "392k",
-  512000: "512k",
-  1000000: "1M",
-};
-
 export function popoverAnchorStyle(): {
   position: "absolute";
   right: number;
@@ -45,8 +37,10 @@ export function compactionThresholdLabel(
 }
 
 export function contextChipCopy(tokens: number | undefined): { label: string; title: string } {
-  const window = tokens === undefined ? undefined : WINDOW_LABELS[tokens];
-  if (window === undefined) return { label: "上下文", title: "上下文" };
+  if (tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) {
+    return { label: "上下文", title: "上下文" };
+  }
+  const window = formatTokenCount(tokens);
   return { label: window, title: `上下文 ${window}` };
 }
 

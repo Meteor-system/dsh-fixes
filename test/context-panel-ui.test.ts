@@ -46,6 +46,7 @@ describe("contextChipCopy", () => {
     expect(contextChipCopy(392_000)).toEqual({ label: "392k", title: "上下文 392k" });
     expect(contextChipCopy(512_000)).toEqual({ label: "512k", title: "上下文 512k" });
     expect(contextChipCopy(1_000_000)).toEqual({ label: "1M", title: "上下文 1M" });
+    expect(contextChipCopy(262_144)).toEqual({ label: "262k", title: "上下文 262k" });
     expect(contextChipCopy(undefined)).toEqual({ label: "上下文", title: "上下文" });
   });
 });

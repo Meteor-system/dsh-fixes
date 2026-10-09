@@ -20,21 +20,25 @@ class TestService extends Service {
   }
 }
 
-function createHarness() {
+function createHarness(history: unknown[] = []) {
   const appended: SessionEvent[] = [];
   const session = {
     seq: 17,
     surface: { replaceGeneration: 0 },
-    deriveMessages: () => [{
-      source: { kind: "skill-invocation", name: "context" },
-      content: "Keep this durable context.",
+    snapshotEvents: () => [...history, {
+      type: "user/message",
+      seq: 1,
+      data: {
+        source: { kind: "skill-invocation", name: "context", form: "instructions" },
+        content: [{ type: "text", text: "Keep this durable context." }],
+      },
     }],
     append(type: string, data: unknown, options?: unknown) {
       appended.push({ type, data, options });
       this.seq += 1;
     },
   };
-  const agent = { session, options: {}, status: "idle" };
+  const agent = { id: "session-1", session, options: {}, status: "idle" };
   const signal = new AbortController().signal;
   const cordis = new Context();
   let commits = 0;
@@ -61,6 +65,8 @@ function createHarness() {
     },
   });
   const registry = getTraceable(cordis, presets);
+  // One stable agents service: the Host resolves the agent through it before /compact.
+  const agents = { get: (id: unknown) => (id === agent.id ? agent : undefined) };
   const listeners = new Map<string, Listener[]>();
   const effects: Array<() => void> = [];
   const commands = new Map<string, Command>();
@@ -83,6 +89,7 @@ function createHarness() {
     },
     get(name) {
       if (name === "agentPresets") return registry;
+      if (name === "agents") return agents;
       if (name === "commands") {
         return {
           register(definition: Command) {
@@ -157,11 +164,51 @@ describe("compaction lifecycle through apply hooks and commands", () => {
           source: {
             kind: "plugin:dsh-fixes",
             form: "snapshot",
-            sections: [{ name: "skill:context", text: "Keep this durable context." }],
+            sections: ["skill:context"],
           },
         },
         options: { surfaceOp: "append" },
       }]);
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  it("rehydrates a direct /compact that runs before any pre-step after a restart", async () => {
+    const harness = createHarness();
+    apply(harness.context);
+    try {
+      // Host lookup happens before the core /compact handler, with no pre-step yet.
+      const agents = harness.context.get("agents") as { get(id: unknown): typeof harness.agent | undefined };
+      const agent = agents.get("session-1")!;
+      const compaction = harness.registry.serviceFor(agent, "compaction")!;
+      await compaction.compactNow(agent, harness.signal);
+
+      expect(harness.commits).toBe(1);
+      expect(harness.appended).toHaveLength(1);
+      expect(harness.appended[0]?.data).toMatchObject({ id: "dsh-fixes-rehydration-17" });
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  it("lists recently touched workspace files as paths, without their bodies", async () => {
+    const turn = { turn: 1, step: 1 };
+    const history = [
+      { type: "tool/call", seq: 1, data: { ...turn, callId: "r1", name: "read", arguments: JSON.stringify({ file_path: "src/index.ts" }) } },
+      { type: "tool/result", seq: 2, data: { ...turn, message: { role: "tool", toolCallId: "r1", content: [{ type: "text", text: "FILE_BODY_MARKER" }] } } },
+      { type: "tool/call", seq: 3, data: { ...turn, callId: "r2", name: "read", arguments: JSON.stringify({ file_path: "node_modules/pkg/index.js" }) } },
+      { type: "tool/result", seq: 4, data: { ...turn, message: { role: "tool", toolCallId: "r2", content: [{ type: "text", text: "DEP_BODY" }] } } },
+    ];
+    const harness = createHarness(history);
+    apply(harness.context);
+    try {
+      expect(await harness.manualCompact()).toEqual({ kind: "success" });
+      const text = (harness.appended[0]?.data as { content: Array<{ text: string }> }).content[0]!.text;
+      expect(text).toContain("- src/index.ts");
+      expect(text).not.toContain("node_modules");
+      expect(text).not.toContain("FILE_BODY_MARKER");
+      expect(text).not.toContain("DEP_BODY");
     } finally {
       harness.dispose();
     }

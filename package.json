@@ -1,7 +1,7 @@
 {
   "name": "dsh-fixes",
   "version": "0.1.0",
-  "description": "DeepSeek Harness web-profile plugin: image input and context windows for third-party gateways, free DuckDuckGo search, and composer context controls.",
+  "description": "DeepSeek Harness web-profile plugin: image input and context windows for third-party gateways, and composer context controls with compaction.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

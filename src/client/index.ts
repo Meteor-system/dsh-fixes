@@ -588,9 +588,11 @@ function applyMounted(ctx: ClientContext): void {
     const onSessionWindowOnly = (only: boolean) => {
       if (sessionId === undefined) return;
       if (only) {
+        // With no stored or catalog window there is nothing real to pin, so do not invent one.
+        if (selectedWindow === undefined) return;
         persistOverrides(
           patchSessionOverride(fixes.sessionOverrides, sessionId, {
-            window: selectedWindow ?? 128000,
+            window: selectedWindow,
           }),
         );
         return;
@@ -628,6 +630,17 @@ function applyMounted(ctx: ClientContext): void {
       if (index <= 0) return;
       persistField("summarization", { provider: value.slice(0, index), model: value.slice(index + 1) });
     };
+
+    const onImageInput = (allowed: boolean) => {
+      if (modelRefKey === undefined) {
+        setError("无法解析当前模型，图片开关改不了");
+        return;
+      }
+      persistField("imageInputModels", { ...fixes.imageInputModels, [modelRefKey]: allowed });
+    };
+
+    // Image input is off unless this model is recorded as on.
+    const imageAllowed = modelRefKey !== undefined && fixes.imageInputModels[modelRefKey] === true;
 
     const onCompact = () => {
       setError("正在压缩…");
@@ -765,6 +778,17 @@ function applyMounted(ctx: ClientContext): void {
                     ),
                   ),
                 ),
+              ),
+            ),
+            createElement(
+              "div",
+              { style: rowStyle },
+              createElement("label", { style: labelStyle }, "图片输入"),
+              checkboxRow("当前模型允许图片", imageAllowed, windowDisabled, onImageInput),
+              createElement(
+                "p",
+                { style: noteStyle },
+                "默认关闭，所有模型包括老模型都只收文本；勾选后按当前模型保存。",
               ),
             ),
             createElement(

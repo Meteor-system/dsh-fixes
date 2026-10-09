@@ -16,7 +16,16 @@ describe("parseFixesSettings", () => {
       compactionReserves: {},
       autoCompactEnabled: true,
       sessionOverrides: {},
+      imageInputModels: {},
     });
+  });
+
+  it("keeps only boolean image switches keyed by route/model", () => {
+    expect(
+      parseFixesSettings({
+        imageInputModels: { "routin/gpt-5.4": false, "routin/gpt-x": "no", "": true },
+      }).imageInputModels,
+    ).toEqual({ "routin/gpt-5.4": false });
   });
 
   it("keeps a stored grok window, summarizer, and route reserve", () => {
@@ -37,6 +46,7 @@ describe("parseFixesSettings", () => {
       },
       autoCompactEnabled: true,
       sessionOverrides: {},
+      imageInputModels: {},
     });
   });
 
@@ -85,6 +95,7 @@ describe("parseFixesSettings", () => {
       sessionOverrides: {
         "sess-1": { window: 128000, autoCompactEnabled: true },
       },
+      imageInputModels: {},
     });
   });
 });
